@@ -16,7 +16,7 @@ import org.example.model.require.TenderRequirements;
 import org.example.model.resp.TenderParseEvent;
 import org.example.prompts.CatalogPromptProvider;
 import org.example.service.BidCatalogService;
-import org.example.service.CatalogResultParser;
+import org.example.service.CatalogGenerationService;
 import org.example.service.RuntimeContextBuilder;
 import org.example.service.TenderParseEventTransformer;
 import org.example.service.TenderRequirementsService;
@@ -48,7 +48,7 @@ public class TenderController {
     private final TenderParseEventTransformer eventTransformer;
     private final RuntimeContextBuilder contextBuilder;
     private final CatalogPromptProvider catalogPromptProvider;
-    private final CatalogResultParser catalogResultParser;
+    private final CatalogGenerationService catalogGenerationService;
     private final BidCatalogService bidCatalogService;
 
     public TenderController(ObjectProvider<HarnessAgent.Builder> builderProvider,
@@ -56,14 +56,14 @@ public class TenderController {
                             TenderParseEventTransformer eventTransformer,
                             RuntimeContextBuilder contextBuilder,
                             CatalogPromptProvider catalogPromptProvider,
-                            CatalogResultParser catalogResultParser,
+                            CatalogGenerationService catalogGenerationService,
                             BidCatalogService bidCatalogService) {
         this.builderProvider = builderProvider;
         this.requirementService = requirementService;
         this.eventTransformer = eventTransformer;
         this.contextBuilder = contextBuilder;
         this.catalogPromptProvider = catalogPromptProvider;
-        this.catalogResultParser = catalogResultParser;
+        this.catalogGenerationService = catalogGenerationService;
         this.bidCatalogService = bidCatalogService;
     }
 
@@ -134,11 +134,13 @@ public class TenderController {
                     - `gaps`：缺口说明，无缺口时为空数组
 
                     ### 失败说明
-                    - 模型未返回可解析的 JSON 或 JSON 不合法时返回 502 Bad Gateway。
+                    - 返回的目录已通过保存前校验（章节编号、必填字段、列宽），可直接调用 `/tender/catalog/save`。
+                    - 模型输出未通过校验（JSON 不合法、章节编号不连续、字段超长等）时，会把原始输出与
+                      失败原因回传模型重新生成一次；重试后仍失败返回 502 Bad Gateway。
                     """)
     @PostMapping("/catalog")
     public Mono<CatalogResult> generateCatalog(@RequestBody CatalogRequest request) {
-        return runCatalogGeneration(request.getUserId(),
+        return catalogGenerationService.generate(request.getUserId(),
                 catalogPromptProvider.render(request.getTenderRequirementId()));
     }
 
@@ -158,7 +160,9 @@ public class TenderController {
 
                     ### 失败说明
                     - `previousCatalog` 或 `customPrompt` 为空时返回 400 Bad Request。
-                    - 模型未返回可解析的 JSON 或 JSON 不合法时返回 502 Bad Gateway。
+                    - 返回的目录已通过保存前校验，可直接调用 `/tender/catalog/save`。
+                    - 模型输出未通过校验（JSON 不合法、章节编号不连续、字段超长等）时，会把原始输出与
+                      失败原因回传模型重新生成一次；重试后仍失败返回 502 Bad Gateway。
                     """)
     @PostMapping("/catalog/adjust")
     public Mono<CatalogResult> adjustCatalog(@RequestBody CatalogAdjustRequest request) {
@@ -170,7 +174,7 @@ public class TenderController {
             return Mono.error(new ResponseStatusException(
                     HttpStatus.BAD_REQUEST, "用户调整要求 customPrompt 不能为空"));
         }
-        return runCatalogGeneration(request.getUserId(),
+        return catalogGenerationService.generate(request.getUserId(),
                 adjustmentBlocks(catalogPromptProvider.renderAdjustment(request.getTenderRequirementId(),
                         request.getPreviousCatalog(), request.getCustomPrompt())));
     }
@@ -243,26 +247,6 @@ public class TenderController {
                 TextBlock.builder().text(prompt.rules()).build(),
                 TextBlock.builder().text(prompt.previousCatalog()).build(),
                 TextBlock.builder().text(prompt.customPrompt()).build());
-    }
-
-    /** 目录生成与调整共用的执行流程：新建会话、发送消息、解析目录 JSON。 */
-    private Mono<CatalogResult> runCatalogGeneration(String userId, String prompt) {
-        return runCatalogGeneration(userId, List.of(TextBlock.builder().text(prompt).build()));
-    }
-
-    /** 以多个内容块发送，避免将规则、上一轮目录与用户要求拼接成一段超长文本。 */
-    private Mono<CatalogResult> runCatalogGeneration(String userId, List<ContentBlock> blocks) {
-        RuntimeContext ctx = contextBuilder.build(userId);
-
-        HarnessAgent.Builder builder = builderProvider.getObject();
-
-        return Mono.using(
-                builder::build,
-                agent -> agent.call(new UserMessage(blocks), ctx)
-                        .map(Msg::getTextContent)
-                        .map(catalogResultParser::parse),
-                HarnessAgent::close
-        );
     }
 
     @Operation(summary = "撰写投标章节",
