@@ -122,7 +122,41 @@ src/main/resources/prompts/   # 提示词模板
 src/main/resources/agentscope-workspace/  # Agent 工作区（AGENTS.md、子 Agent 声明）
 .agentscope/workspace/        # 运行时工作区（会话、记忆）
 docs/tender-demo/             # 详细设计文档
+.opencode/skills/code-to-doc-generator/  # 代码逆向生成文档 Skill
 ```
+
+## 文档生成 Skill：code-to-doc-generator
+
+内置项目级 Skill（`.opencode/skills/code-to-doc-generator/`），从代码与运行产物逆向生成文档，自动加载（项目级优先级高于全局 `~/.config/opencode/skills/`）。
+
+**四轴参数**：类型 × 范围 × 受众 × 叙事
+
+| 轴 | 取值 |
+|---|---|
+| 类型 | brd-mrd、prd、hld、ddd、lld、coding-guide、test-doc、operations-manual、slo、cicd、admin-quick-reference |
+| 范围 | module、subsystem、project、package |
+| 受众 | dev、architect、business、operator |
+| 叙事 | engineering（按实现路径）、review（业务主线 + 技术保障）、acceptance（按验收项） |
+
+**用法**：只给类型与范围即可，受众与叙事按默认值推断并在参数卡中声明。
+
+```
+用 code-to-doc-generator 生成 LLD 详细设计，范围 project，受众 business
+```
+
+**两种模式与收尾校验**：
+
+- 生成模式：输出参数卡 → 四轮工作流（项目基线 → 结构扫描 → 逐模块分析 → 骨架/填充）
+- 反向同步模式：文档已存在但可能漂移，以代码为准校准（`references/reverse-sync.md`）
+- 收尾：证据标注、脱敏、结构一致性由脚本机器校验，未通过不得汇报完成
+
+```bash
+python3 .opencode/skills/code-to-doc-generator/scripts/validate_doc.py \
+  docs/tender-demo/详细设计-tender-service-v1.md \
+  --root . --profile lld --audience business
+```
+
+退出码：`0` 通过、`1` 有错误、`2` 参数错误，加 `--json` 输出机器可读结果。入口说明见 [SKILL.md](.opencode/skills/code-to-doc-generator/SKILL.md) 与 [README.md](.opencode/skills/code-to-doc-generator/README.md)。
 
 ## 相关文档
 
