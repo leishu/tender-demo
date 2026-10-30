@@ -21,12 +21,15 @@ import org.example.service.RuntimeContextBuilder;
 import org.example.service.TenderParseEventTransformer;
 import org.example.service.TenderRequirementsService;
 import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.http.HttpStatus;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 import reactor.core.publisher.Flux;
@@ -170,6 +173,31 @@ public class TenderController {
         return runCatalogGeneration(request.getUserId(),
                 adjustmentBlocks(catalogPromptProvider.renderAdjustment(request.getTenderRequirementId(),
                         request.getPreviousCatalog(), request.getCustomPrompt())));
+    }
+
+    @Operation(summary = "获取已保存的投标目录",
+            description = """
+                    按招标要求查询已保存的投标目录，返回结构与 `/tender/catalog` 一致，可直接用于展示或再次调整。
+
+                    ### 参数
+                    - `tenderRequirementId`：招标要求主键（必填）
+
+                    ### 响应说明
+                    - `catalog`：合并目录，顶层为一级章节，子章节在 `children` 中，最多三级；商务/技术分列时为空
+                    - `businessCatalog` / `technicalCatalog`：商务标、技术标两套目录，仅分列时返回
+                    - `structureDecision`：保存时的结构判断说明
+                    - `gaps`：缺口说明，无缺口时为空数组
+
+                    ### 失败说明
+                    - `tenderRequirementId` 为空时返回 400 Bad Request。
+                    - 招标要求不存在，或该招标要求尚未保存目录时返回 404 Not Found。
+                    """)
+    @GetMapping("/catalog")
+    public Mono<CatalogResult> getCatalog(
+            @Parameter(description = "招标要求ID", example = "1234567890")
+            @RequestParam("tenderRequirementId") Long tenderRequirementId) {
+        return Mono.fromCallable(() -> bidCatalogService.find(tenderRequirementId))
+                .subscribeOn(Schedulers.boundedElastic());
     }
 
     @Operation(summary = "保存投标目录",

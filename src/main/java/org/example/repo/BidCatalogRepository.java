@@ -20,6 +20,8 @@ import org.springframework.stereotype.Repository;
 import org.springframework.util.CollectionUtils;
 import org.springframework.util.StringUtils;
 
+import java.util.ArrayList;
+import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -97,6 +99,54 @@ public class BidCatalogRepository {
         }
         saveGaps(runId, result.getGaps(), now);
         return runId;
+    }
+
+    /**
+     * 查询招标要求下已保存的目录，按最近一次批次还原章节树、评分点关联与缺口。
+     *
+     * @return 无保存记录时返回 {@code null}
+     */
+    public CatalogResult findByTenderRequirementId(Long tenderRequirementId) {
+        List<BidCatalogRun> runs = runMapper.selectList(new LambdaQueryWrapper<BidCatalogRun>()
+                .eq(BidCatalogRun::getTenderRequirementId, tenderRequirementId)
+                .orderByDesc(BidCatalogRun::getId));
+        if (runs.isEmpty()) {
+            return null;
+        }
+        BidCatalogRun run = runs.get(0);
+
+        List<BidCatalog> catalogs = catalogMapper.selectList(new LambdaQueryWrapper<BidCatalog>()
+                .eq(BidCatalog::getCatalogRunId, run.getId())
+                .orderByAsc(BidCatalog::getChapterLevel)
+                .orderByAsc(BidCatalog::getSortNo)
+                .orderByAsc(BidCatalog::getId));
+        Map<Long, List<String>> itemIdsByCatalogId = loadScoringItemIds(catalogs);
+
+        Map<Long, List<BidCatalog>> childrenIndex = new HashMap<>();
+        Map<CatalogCategory, List<BidCatalog>> roots = new EnumMap<>(CatalogCategory.class);
+        for (BidCatalog catalog : catalogs) {
+            CatalogCategory category = catalog.getCatalogCategory() == null
+                    ? CatalogCategory.COMMON : catalog.getCatalogCategory();
+            if (catalog.getParentId() == null) {
+                roots.computeIfAbsent(category, key -> new ArrayList<>()).add(catalog);
+            } else {
+                childrenIndex.computeIfAbsent(catalog.getParentId(), key -> new ArrayList<>()).add(catalog);
+            }
+        }
+
+        CatalogResult result = new CatalogResult();
+        result.setStructureDecision(run.getStructureDecision());
+        if (Boolean.TRUE.equals(run.getSplitFlag())) {
+            result.setBusinessCatalog(buildNodes(roots.get(CatalogCategory.BUSINESS),
+                    childrenIndex, itemIdsByCatalogId));
+            result.setTechnicalCatalog(buildNodes(roots.get(CatalogCategory.TECHNICAL),
+                    childrenIndex, itemIdsByCatalogId));
+        } else {
+            result.setCatalog(buildNodes(roots.get(CatalogCategory.COMMON),
+                    childrenIndex, itemIdsByCatalogId));
+        }
+        result.setGaps(findGaps(run.getId()));
+        return result;
     }
 
     /** 删除指定招标要求下的目录批次及其章节、评分点关联、缺口 */
@@ -208,6 +258,61 @@ public class BidCatalogRepository {
             entity.setCreatedAt(now);
             gapMapper.insert(entity);
         }
+    }
+
+    /** 还原一层（同一父章节下的同级章节）为树节点，children 递归还原下级 */
+    private List<CatalogNode> buildNodes(List<BidCatalog> catalogs, Map<Long, List<BidCatalog>> childrenIndex,
+                                         Map<Long, List<String>> itemIdsByCatalogId) {
+        if (CollectionUtils.isEmpty(catalogs)) {
+            return new ArrayList<>();
+        }
+        List<CatalogNode> nodes = new ArrayList<>();
+        for (BidCatalog catalog : catalogs) {
+            CatalogNode node = new CatalogNode();
+            node.setChapterNo(catalog.getChapterNo());
+            node.setTitle(catalog.getTitle());
+            node.setContentHint(catalog.getContentHint());
+            node.setScoringItemIds(new ArrayList<>(
+                    itemIdsByCatalogId.getOrDefault(catalog.getId(), List.of())));
+            node.setChildren(buildNodes(childrenIndex.get(catalog.getId()),
+                    childrenIndex, itemIdsByCatalogId));
+            nodes.add(node);
+        }
+        return nodes;
+    }
+
+    /** 按章节主键聚合评分点 id：catalog_id -> item_id 列表，保持保存时的顺序 */
+    private Map<Long, List<String>> loadScoringItemIds(List<BidCatalog> catalogs) {
+        if (CollectionUtils.isEmpty(catalogs)) {
+            return Map.of();
+        }
+        List<Long> catalogIds = catalogs.stream().map(BidCatalog::getId).toList();
+        List<BidCatalogScoringItem> relations = scoringItemRelMapper.selectList(
+                new LambdaQueryWrapper<BidCatalogScoringItem>()
+                        .in(BidCatalogScoringItem::getCatalogId, catalogIds)
+                        .orderByAsc(BidCatalogScoringItem::getSortNo)
+                        .orderByAsc(BidCatalogScoringItem::getId));
+        Map<Long, List<String>> index = new HashMap<>();
+        for (BidCatalogScoringItem relation : relations) {
+            index.computeIfAbsent(relation.getCatalogId(), key -> new ArrayList<>())
+                    .add(relation.getItemId());
+        }
+        return index;
+    }
+
+    /** 按批次读取缺口说明，保持保存时的顺序 */
+    private List<CatalogGap> findGaps(Long runId) {
+        List<BidCatalogGap> gaps = gapMapper.selectList(new LambdaQueryWrapper<BidCatalogGap>()
+                .eq(BidCatalogGap::getCatalogRunId, runId)
+                .orderByAsc(BidCatalogGap::getId));
+        List<CatalogGap> result = new ArrayList<>();
+        for (BidCatalogGap gap : gaps) {
+            CatalogGap dto = new CatalogGap();
+            dto.setType(gap.getGapType());
+            dto.setDetail(gap.getDetail());
+            result.add(dto);
+        }
+        return result;
     }
 
     /** 按招标要求加载评分点索引：item_id -> t_scoring_item 主键 */
