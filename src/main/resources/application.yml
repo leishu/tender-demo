@@ -1,0 +1,52 @@
+server:
+  port: 8080
+
+
+spring:
+  application:
+    name: tender-service
+  threads:
+    virtual:
+      enabled: true
+  datasource:
+    url: jdbc:mysql://127.0.0.1:3306/tender_demo?useUnicode=true&characterEncoding=utf8
+    username: tender
+    password: tender123
+    driver-class-name: com.mysql.cj.jdbc.Driver
+
+
+llm:
+  log-path: ./logs/llm
+
+
+
+agentscope:
+  workspace-path: .agentscope/workspace
+  model: glm-5.2
+  api-key: ${AGENTSCOPE_API_KEY:}
+
+
+# 知识库：向量检索 + 全文检索（Elasticsearch）
+knowledge-base:
+  index-name: knowledge_base
+  es:
+    # 多个节点用逗号分隔，如 http://host1:9200,http://host2:9200
+    uris: ${ES_URIS:http://127.0.0.1:9200}
+    username: ${ES_USERNAME:}
+    password: ${ES_PASSWORD:}
+    # 优先级高于用户名密码；带鉴权的 ES 只需配置其中一种
+    api-key: ${ES_API_KEY:}
+  embedding:
+    # es: 使用 ES 内置 multilingual-e5-small（384 维，完全本地）
+    # dashscope: 使用阿里云 DashScope text-embedding-v3（1024 维，需 api-key）
+    provider: es
+    # ES 内置 endpoint ID（ES 9.x 自带）
+    es-endpoint-id: .multilingual-e5-small-elasticsearch
+    # 必须与已有索引的 dense_vector dims 一致，修改后需重建索引
+    dimension: 384
+    batch-size: 100
+    # DashScope 配置（provider=dashscope 时生效，provider=es 时忽略）
+    base-url: ${DASHSCOPE_BASE_URL:https://dashscope.aliyuncs.com}
+    path: /api/v1/services/embeddings/text-embedding/text-embedding
+    api-key: "${DASHSCOPE_API_KEY:}"
+    model: text-embedding-v3
