@@ -1,7 +1,9 @@
 package org.example.controller;
 
 import io.agentscope.core.agent.RuntimeContext;
+import io.agentscope.core.message.ContentBlock;
 import io.agentscope.core.message.Msg;
+import io.agentscope.core.message.TextBlock;
 import io.agentscope.core.message.UserMessage;
 import io.agentscope.harness.agent.HarnessAgent;
 import org.example.model.catalog.dto.CatalogResult;
@@ -27,6 +29,8 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+
+import java.util.List;
 
 @Tag(name = "招标文件解析与投标生成")
 @RestController
@@ -158,19 +162,32 @@ public class TenderController {
                     HttpStatus.BAD_REQUEST, "用户调整要求 customPrompt 不能为空"));
         }
         return runCatalogGeneration(request.getUserId(),
-                catalogPromptProvider.renderAdjustment(request.getTenderRequirementId(),
-                        request.getPreviousCatalog(), request.getCustomPrompt()));
+                adjustmentBlocks(catalogPromptProvider.renderAdjustment(request.getTenderRequirementId(),
+                        request.getPreviousCatalog(), request.getCustomPrompt())));
     }
 
-    /** 目录生成与调整共用的执行流程：新建会话、发送提示词、解析目录 JSON。 */
+    /** 将调整提示词拆成三个独立的文本内容块：生成规则、上一轮目录、用户调整要求。 */
+    private List<ContentBlock> adjustmentBlocks(CatalogPromptProvider.CatalogAdjustPrompt prompt) {
+        return List.of(
+                TextBlock.builder().text(prompt.rules()).build(),
+                TextBlock.builder().text(prompt.previousCatalog()).build(),
+                TextBlock.builder().text(prompt.customPrompt()).build());
+    }
+
+    /** 目录生成与调整共用的执行流程：新建会话、发送消息、解析目录 JSON。 */
     private Mono<CatalogResult> runCatalogGeneration(String userId, String prompt) {
+        return runCatalogGeneration(userId, List.of(TextBlock.builder().text(prompt).build()));
+    }
+
+    /** 以多个内容块发送，避免将规则、上一轮目录与用户要求拼接成一段超长文本。 */
+    private Mono<CatalogResult> runCatalogGeneration(String userId, List<ContentBlock> blocks) {
         RuntimeContext ctx = contextBuilder.build(userId);
 
         HarnessAgent.Builder builder = builderProvider.getObject();
 
         return Mono.using(
                 builder::build,
-                agent -> agent.call(new UserMessage(prompt), ctx)
+                agent -> agent.call(new UserMessage(blocks), ctx)
                         .map(Msg::getTextContent)
                         .map(catalogResultParser::parse),
                 HarnessAgent::close

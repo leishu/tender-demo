@@ -1,10 +1,14 @@
 package org.example.middleware;
 
+import tools.jackson.core.util.DefaultIndenter;
+import tools.jackson.core.util.DefaultPrettyPrinter;
+import tools.jackson.core.util.Separators;
 import tools.jackson.databind.json.JsonMapper;
 import tools.jackson.databind.SerializationFeature;
 import io.agentscope.core.agent.Agent;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.event.*;
+import io.agentscope.core.message.ContentBlock;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.MsgRole;
 import io.agentscope.core.message.TextBlock;
@@ -29,7 +33,6 @@ import java.util.*;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
-import java.util.stream.Collectors;
 
 @Component
 @Slf4j
@@ -41,9 +44,14 @@ public class ModelCallAuditMiddleware implements MiddlewareBase {
     /**
      * 线程安全的 ObjectMapper，应用启动时配置一次即可复用
      * Jackson 3 内置 Java 8 时间支持，无需注册模块，时间类型默认按 ISO 字符串序列化
+     * <p>数组缩进器改为逐行输出：文本块数组（content）一块一行，便于在日志中逐块对比；
+     * 数组为空时输出 {@code []} 而非 {@code [ ]}。
      */
     private static final JsonMapper MAPPER = JsonMapper.builder()
             .enable(SerializationFeature.INDENT_OUTPUT)
+            .defaultPrettyPrinter(new DefaultPrettyPrinter(
+                    Separators.createDefaultInstance().withArrayEmptySeparator(""))
+                    .withArrayIndenter(new DefaultIndenter("  ", "\n")))
             .build();
 
     /** 东八区时区，用于日志时间展示 */
@@ -124,31 +132,9 @@ public class ModelCallAuditMiddleware implements MiddlewareBase {
                 String roleStr = (role != null) ? role.name() : "UNKNOWN";
 
                 if (Objects.equals(role, MsgRole.TOOL)) {
-                    // 收集 ToolResultBlock：提取 output 中的文本，并附带工具名与执行状态
-                    StringBuilder toolDetail = new StringBuilder();
-                    AtomicReference<String> toolNameRef = new AtomicReference<>();
-
-                    msg.getContent().stream()
-                            .filter(block -> block instanceof ToolResultBlock)
-                            .forEach(block -> {
-                                ToolResultBlock result = (ToolResultBlock) block;
-                                String name = result.getName();
-                                toolNameRef.set(name);
-                                toolDetail.append(result.getOutput().stream()
-                                        .filter(cb -> cb instanceof TextBlock)
-                                        .map(cb -> ((TextBlock) cb).getText())
-                                        .collect(Collectors.joining()));
-                            });
-
-                    promptMessages.add(new ToolPromptMessage(roleStr, toolNameRef.get(), toolDetail.toString()));
-                }else {
-                    // 从 ContentBlock 列表中只提取 TextBlock 的文本
-                    String textContent = msg.getContent().stream()
-                            .filter(block -> block instanceof TextBlock)
-                            .map(block -> ((TextBlock) block).getText())
-                            .collect(Collectors.joining());
-
-                    promptMessages.add(new PromptMessage(roleStr, textContent));
+                    promptMessages.add(buildToolMessage(roleStr, msg));
+                } else {
+                    promptMessages.add(new PromptMessage(roleStr, textOf(msg.getContent())));
                 }
             }
         }
@@ -156,15 +142,46 @@ public class ModelCallAuditMiddleware implements MiddlewareBase {
         return promptMessages;
     }
 
+    /** 工具结果消息：记录工具名，并把各 ToolResultBlock 中的文本块按块收集为数组。 */
+    private ToolPromptMessage buildToolMessage(String role, Msg msg) {
+        List<String> contents = new ArrayList<>();
+        AtomicReference<String> toolNameRef = new AtomicReference<>();
+
+        for (ContentBlock block : msg.getContent()) {
+            if (block instanceof ToolResultBlock result) {
+                toolNameRef.set(result.getName());
+                contents.addAll(textOf(result.getOutput()));
+            }
+        }
+
+        return new ToolPromptMessage(role, toolNameRef.get(), contents);
+    }
+
     /**
-     * 单条提示消息，对应 JSON 数组中的一个对象
+     * 提取内容块中的文本：每个 TextBlock 单独保留为数组中的一个元素，
+     * 便于在审计日志中回溯原始分块结构，而不是被拼接成一段长文本。
+     */
+    private static List<String> textOf(List<ContentBlock> blocks) {
+        if (blocks == null) {
+            return List.of();
+        }
+        return blocks.stream()
+                .filter(TextBlock.class::isInstance)
+                .map(block -> ((TextBlock) block).getText())
+                .filter(text -> !text.isBlank())
+                .toList();
+    }
+
+    /**
+     * 单条提示消息，对应 JSON 数组中的一个对象；
+     * {@code content} 为文本块数组，一个 TextBlock 对应一个元素。
      */
     @Getter
     private static class PromptMessage {
         final String role;
-        final String content;
+        final List<String> content;
 
-        public PromptMessage(String role, String content) {
+        public PromptMessage(String role, List<String> content) {
             this.role = role;
             this.content = content;
         }
@@ -174,7 +191,7 @@ public class ModelCallAuditMiddleware implements MiddlewareBase {
     private static class ToolPromptMessage extends PromptMessage {
         final String toolName;
 
-        public ToolPromptMessage(String role, String toolName, String content) {
+        public ToolPromptMessage(String role, String toolName, List<String> content) {
             super(role, content);
             this.toolName = toolName;
         }
