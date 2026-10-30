@@ -1,5 +1,6 @@
 package org.example.service;
 
+import org.example.model.catalog.dto.CatalogNode;
 import org.example.model.catalog.dto.CatalogResult;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -10,6 +11,7 @@ import tools.jackson.core.JacksonException;
 import tools.jackson.databind.json.JsonMapper;
 
 import java.util.ArrayList;
+import java.util.List;
 
 /**
  * 将 catalog-generation 提示词返回的文本解析为 {@link CatalogResult}。
@@ -53,7 +55,7 @@ public class CatalogResultParser {
         return result;
     }
 
-    /** 集合字段补空数组，避免下游判空；同时记录空目录告警。 */
+    /** 集合字段补空数组、清理 null 占位的评分点 id，避免下游判空；同时记录空目录告警。 */
     private void normalize(CatalogResult result) {
         if (result.getCatalog() == null) {
             result.setCatalog(new ArrayList<>());
@@ -61,8 +63,32 @@ public class CatalogResultParser {
         if (result.getGaps() == null) {
             result.setGaps(new ArrayList<>());
         }
+        cleanScoringItemIds(result.getCatalog());
+        cleanScoringItemIds(result.getBusinessCatalog());
+        cleanScoringItemIds(result.getTechnicalCatalog());
         if (result.getCatalog().isEmpty() && !result.isSplit() && result.getGaps().isEmpty()) {
             log.warn("投标目录生成结果为空，structureDecision={}", result.getStructureDecision());
+        }
+    }
+
+    /**
+     * 模型在评分点缺少 itemId 时用 {@code [null]} 占位，这里统一清理为无评分点，
+     * 避免保存前校验因空评分点 id 而拒绝真实模型输出。
+     */
+    private void cleanScoringItemIds(List<CatalogNode> nodes) {
+        if (nodes == null) {
+            return;
+        }
+        for (CatalogNode node : nodes) {
+            if (node == null) {
+                continue;
+            }
+            if (node.getScoringItemIds() == null) {
+                node.setScoringItemIds(new ArrayList<>());
+            } else {
+                node.getScoringItemIds().removeIf(id -> id == null || id.isBlank());
+            }
+            cleanScoringItemIds(node.getChildren());
         }
     }
 

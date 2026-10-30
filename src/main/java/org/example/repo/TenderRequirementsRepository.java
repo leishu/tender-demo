@@ -64,6 +64,12 @@ public class TenderRequirementsRepository {
         return requirements;
     }
 
+    /** 按 id 查询所属企业ID，不存在时返回 null */
+    public Long findEnterpriseId(Long id) {
+        TenderRequirements requirements = tenderRequirementsMapper.selectById(id);
+        return requirements == null ? null : requirements.getEnterpriseId();
+    }
+
     /** 按 id 删除，连同子表一并删除 */
     public void deleteById(Long id) {
         qualificationRequirementMapper.delete(new LambdaQueryWrapper<QualificationRequirement>()

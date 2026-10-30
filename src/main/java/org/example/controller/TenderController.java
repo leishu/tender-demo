@@ -9,11 +9,13 @@ import io.agentscope.harness.agent.HarnessAgent;
 import org.example.model.catalog.dto.CatalogResult;
 import org.example.model.req.CatalogAdjustRequest;
 import org.example.model.req.CatalogRequest;
+import org.example.model.req.CatalogSaveRequest;
 import org.example.model.req.ChapterRequest;
 import org.example.model.req.TenderRequest;
 import org.example.model.require.TenderRequirements;
 import org.example.model.resp.TenderParseEvent;
 import org.example.prompts.CatalogPromptProvider;
+import org.example.service.BidCatalogService;
 import org.example.service.CatalogResultParser;
 import org.example.service.RuntimeContextBuilder;
 import org.example.service.TenderParseEventTransformer;
@@ -29,6 +31,7 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 
 import java.util.List;
 
@@ -43,19 +46,22 @@ public class TenderController {
     private final RuntimeContextBuilder contextBuilder;
     private final CatalogPromptProvider catalogPromptProvider;
     private final CatalogResultParser catalogResultParser;
+    private final BidCatalogService bidCatalogService;
 
     public TenderController(ObjectProvider<HarnessAgent.Builder> builderProvider,
                             TenderRequirementsService requirementService,
                             TenderParseEventTransformer eventTransformer,
                             RuntimeContextBuilder contextBuilder,
                             CatalogPromptProvider catalogPromptProvider,
-                            CatalogResultParser catalogResultParser) {
+                            CatalogResultParser catalogResultParser,
+                            BidCatalogService bidCatalogService) {
         this.builderProvider = builderProvider;
         this.requirementService = requirementService;
         this.eventTransformer = eventTransformer;
         this.contextBuilder = contextBuilder;
         this.catalogPromptProvider = catalogPromptProvider;
         this.catalogResultParser = catalogResultParser;
+        this.bidCatalogService = bidCatalogService;
     }
 
     @Operation(summary = "解析招标文件",
@@ -164,6 +170,43 @@ public class TenderController {
         return runCatalogGeneration(request.getUserId(),
                 adjustmentBlocks(catalogPromptProvider.renderAdjustment(request.getTenderRequirementId(),
                         request.getPreviousCatalog(), request.getCustomPrompt())));
+    }
+
+    @Operation(summary = "保存投标目录",
+            description = """
+                    将目录生成或调整结果落库。同一个招标要求只保留一份目录，重复保存会覆盖旧目录。
+
+                    ### 请求体
+                    - `userId`：用户ID（可选）
+                    - `tenderRequirementId`：招标要求主键（必填），须已存在
+                    - `catalogResult`：目录结果（必填），原样传入 `/tender/catalog` 或 `/tender/catalog/adjust` 的响应体
+
+                    ### 响应说明
+                    - 返回目录批次主键 id（t_bid_catalog_run.id）；章节树、评分点关联与缺口按该批次落库。
+                    - 章节按 `children` 嵌套展开为 `parent_id` 自关联，最多三级；超过三级的子节点不落库。
+                    - 再次保存同一招标要求时会先删除旧的批次、章节、评分点关联与缺口。
+
+                    ### 失败说明
+                    - `tenderRequirementId` 或 `catalogResult` 为空时返回 400 Bad Request。
+                    - 数据校验失败时返回 400 Bad Request：
+                      - 章节编号需与嵌套位置一致（1、1.1、1.1.1），同级从 1 连续递增，不跳号、不重号、不带前导零；
+                      - 章节标题、缺口类型、评分点 id 不能为空；
+                      - 字段长度不得超列宽：章节编号 32、标题 64、内容提示 1024、结构判断说明 512、缺口类型 32、缺口详情 512、评分点 id 64。
+                    - 招标要求不存在时返回 404 Not Found。
+                    """)
+    @PostMapping("/catalog/save")
+    public Mono<Long> saveCatalog(@RequestBody CatalogSaveRequest request) {
+        if (request.getTenderRequirementId() == null) {
+            return Mono.error(new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST, "招标要求 tenderRequirementId 不能为空"));
+        }
+        if (request.getCatalogResult() == null) {
+            return Mono.error(new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST, "目录结果 catalogResult 不能为空"));
+        }
+        return Mono.fromCallable(() -> bidCatalogService.save(request.getTenderRequirementId(),
+                        request.getCatalogResult()))
+                .subscribeOn(Schedulers.boundedElastic());
     }
 
     /** 将调整提示词拆成三个独立的文本内容块：生成规则、上一轮目录、用户调整要求。 */

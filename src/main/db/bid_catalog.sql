@@ -14,7 +14,9 @@
 --   2. 分列时 business_catalog 落 catalog_category='BUSINESS'，
 --      technical_catalog 落 catalog_category='TECHNICAL'；
 --      合并时 catalog 落 catalog_category='COMMON'；
---   3. 章节树通过 parent_id 还原 children 嵌套，chapter_level 限制在 1~3。
+--   3. 章节树通过 parent_id 还原 children 嵌套，chapter_level 限制在 1~3；
+--   4. 一个招标要求只保留一份目录：t_bid_catalog_run.tender_requirement_id 唯一，
+--      重复保存时先删除旧批次（含章节、评分点关联、缺口）再写入新批次。
 -- =====================================================================
 
 
@@ -26,7 +28,7 @@ CREATE TABLE `t_bid_catalog_run` (
     `structure_decision`    VARCHAR(512) NULL COMMENT '结构判断说明：合并目录 / 商务技术分列及一句依据',
     `created_at`            BIGINT       NOT NULL COMMENT '创建时间(epoch ms)',
     PRIMARY KEY (`id`),
-    KEY `idx_tender_requirement_id` (`tender_requirement_id`),
+    UNIQUE KEY `uk_tender_requirement_id` (`tender_requirement_id`),
     KEY `idx_enterprise_id` (`enterprise_id`)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT = '投标目录生成批次（结构判断结果）';
 

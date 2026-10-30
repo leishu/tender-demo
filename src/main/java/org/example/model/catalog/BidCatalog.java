@@ -34,9 +34,8 @@ public class BidCatalog {
     private Integer chapterLevel;
 
     /** 目录归属：COMMON 合并目录、BUSINESS 商务标、TECHNICAL 技术标 */
-    @Schema(description = "目录归属：COMMON 合并目录、BUSINESS 商务标、TECHNICAL 技术标",
-            allowableValues = {"COMMON", "BUSINESS", "TECHNICAL"}, example = "COMMON")
-    private String catalogCategory;
+    @Schema(description = "目录归属：COMMON 合并目录、BUSINESS 商务标、TECHNICAL 技术标", example = "COMMON")
+    private CatalogCategory catalogCategory;
 
     /** 章节编号，与嵌套位置一致：1、1.1、1.1.1 */
     @Schema(description = "章节编号，与嵌套位置一致：1、1.1、1.1.1", example = "1.1")
