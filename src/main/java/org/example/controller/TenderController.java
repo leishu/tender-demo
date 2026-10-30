@@ -5,6 +5,7 @@ import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.UserMessage;
 import io.agentscope.harness.agent.HarnessAgent;
 import org.example.model.catalog.dto.CatalogResult;
+import org.example.model.req.CatalogAdjustRequest;
 import org.example.model.req.CatalogRequest;
 import org.example.model.req.ChapterRequest;
 import org.example.model.req.TenderRequest;
@@ -18,10 +19,12 @@ import org.example.service.TenderRequirementsService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.server.ResponseStatusException;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
@@ -122,11 +125,48 @@ public class TenderController {
                     """)
     @PostMapping("/catalog")
     public Mono<CatalogResult> generateCatalog(@RequestBody CatalogRequest request) {
-        RuntimeContext ctx = contextBuilder.build(request.getUserId());
+        return runCatalogGeneration(request.getUserId(),
+                catalogPromptProvider.render(request.getTenderRequirementId()));
+    }
+
+    @Operation(summary = "调整投标目录",
+            description = """
+                    在上一轮生成的投标目录基础上，根据用户调整要求重新生成完整目录，返回结构化 JSON。
+
+                    ### 请求体
+                    - `userId`：用户ID（可选）
+                    - `tenderRequirementId`：招标要求主键（必填）
+                    - `previousCatalog`：上一轮生成的目录结果（必填），原样传入 `/tender/catalog` 或本接口上一轮的响应体
+                    - `customPrompt`：用户调整要求（必填），如调整章节顺序、拆分/合并章节、改名、增删章节
+
+                    ### 响应说明
+                    与 `/tender/catalog` 一致：`catalog` 或 `businessCatalog` / `technicalCatalog`、`structureDecision`、`gaps`。
+                    用户未要求修改的章节会保留原编号与内容提示，仅按要求部分调整并重排编号。
+
+                    ### 失败说明
+                    - `previousCatalog` 或 `customPrompt` 为空时返回 400 Bad Request。
+                    - 模型未返回可解析的 JSON 或 JSON 不合法时返回 502 Bad Gateway。
+                    """)
+    @PostMapping("/catalog/adjust")
+    public Mono<CatalogResult> adjustCatalog(@RequestBody CatalogAdjustRequest request) {
+        if (request.getPreviousCatalog() == null) {
+            return Mono.error(new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST, "上一轮生成的目录 previousCatalog 不能为空"));
+        }
+        if (request.getCustomPrompt() == null || request.getCustomPrompt().isBlank()) {
+            return Mono.error(new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST, "用户调整要求 customPrompt 不能为空"));
+        }
+        return runCatalogGeneration(request.getUserId(),
+                catalogPromptProvider.renderAdjustment(request.getTenderRequirementId(),
+                        request.getPreviousCatalog(), request.getCustomPrompt()));
+    }
+
+    /** 目录生成与调整共用的执行流程：新建会话、发送提示词、解析目录 JSON。 */
+    private Mono<CatalogResult> runCatalogGeneration(String userId, String prompt) {
+        RuntimeContext ctx = contextBuilder.build(userId);
 
         HarnessAgent.Builder builder = builderProvider.getObject();
-
-        var prompt = catalogPromptProvider.render(request.getTenderRequirementId());
 
         return Mono.using(
                 builder::build,
