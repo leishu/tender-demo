@@ -113,6 +113,7 @@ src/main/java/org/example
 ├── model/        # 请求/响应、招标要求、目录、知识库等模型
 ├── config/       # Agent 装配、ES 客户端、知识库配置绑定
 ├── tools/        # Agent 可调用的工具（招标要求、企业数据）
+├── filter/        # Web 访问日志
 ├── middleware/   # 模型调用审计
 ├── prompts/      # 提示词提供者
 └── client/       # Embedding 客户端（ES Inference / DashScope）
