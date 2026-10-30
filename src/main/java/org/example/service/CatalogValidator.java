@@ -32,23 +32,6 @@ public class CatalogValidator {
     /** 与落库一致：最多三级 */
     private static final int MAX_CHAPTER_LEVEL = 3;
 
-    // ---------- 列宽上限：与建库脚本中的列定义对齐 ----------
-
-    /** t_bid_catalog.chapter_no VARCHAR(32) */
-    private static final int CHAPTER_NO_MAX = 32;
-    /** t_bid_catalog.title VARCHAR(64) */
-    private static final int TITLE_MAX = 64;
-    /** t_bid_catalog.content_hint VARCHAR(1024) */
-    private static final int CONTENT_HINT_MAX = 1024;
-    /** t_bid_catalog_run.structure_decision VARCHAR(512) */
-    private static final int STRUCTURE_DECISION_MAX = 512;
-    /** t_bid_catalog_gap.gap_type VARCHAR(32) */
-    private static final int GAP_TYPE_MAX = 32;
-    /** t_bid_catalog_gap.detail VARCHAR(512) */
-    private static final int GAP_DETAIL_MAX = 512;
-    /** t_bid_catalog_scoring_item.item_id VARCHAR(64) */
-    private static final int ITEM_ID_MAX = 64;
-
     /**
      * 校验目录结果的章节编号。
      *
@@ -61,7 +44,7 @@ public class CatalogValidator {
         } else {
             validateLevel(CatalogCategory.COMMON, result.getCatalog(), null, 1);
         }
-        validateMaxLength("目录的结构判断说明", result.getStructureDecision(), STRUCTURE_DECISION_MAX);
+        validateMaxLength("目录的结构判断说明", result.getStructureDecision(), CatalogLimits.STRUCTURE_DECISION_MAX);
         validateGaps(result.getGaps());
     }
 
@@ -99,7 +82,7 @@ public class CatalogValidator {
             }
             // 去掉首尾空白后回写，保证落库值与校验值一致
             node.setChapterNo(actualNo);
-            validateMaxLength(category.getLabel() + "第 " + actualNo + " 章的编号", actualNo, CHAPTER_NO_MAX);
+            validateMaxLength(category.getLabel() + "第 " + actualNo + " 章的编号", actualNo, CatalogLimits.CHAPTER_NO_MAX);
             validateNodeFields(category, actualNo, node);
             validateLevel(category, node.getChildren(), actualNo, level + 1);
         }
@@ -125,8 +108,8 @@ public class CatalogValidator {
         if (!StringUtils.hasText(node.getTitle())) {
             throw badRequest(prefix + "的标题不能为空");
         }
-        validateMaxLength(prefix + "的标题", node.getTitle(), TITLE_MAX);
-        validateMaxLength(prefix + "的内容提示", node.getContentHint(), CONTENT_HINT_MAX);
+        validateMaxLength(prefix + "的标题", node.getTitle(), CatalogLimits.TITLE_MAX);
+        validateMaxLength(prefix + "的内容提示", node.getContentHint(), CatalogLimits.CONTENT_HINT_MAX);
         validateScoringItems(prefix, node.getScoringItemIds());
     }
 
@@ -139,7 +122,7 @@ public class CatalogValidator {
             if (!StringUtils.hasText(itemId)) {
                 throw badRequest(prefix + "的评分点 id 不能为空");
             }
-            validateMaxLength(prefix + "的评分点 id（" + itemId + "）", itemId, ITEM_ID_MAX);
+            validateMaxLength(prefix + "的评分点 id（" + itemId + "）", itemId, CatalogLimits.ITEM_ID_MAX);
         }
     }
 
@@ -158,16 +141,28 @@ public class CatalogValidator {
             if (!StringUtils.hasText(gap.getType())) {
                 throw badRequest(prefix + "的缺口类型不能为空");
             }
-            validateMaxLength(prefix + "的缺口类型", gap.getType(), GAP_TYPE_MAX);
-            validateMaxLength(prefix + "的缺口详情", gap.getDetail(), GAP_DETAIL_MAX);
+            validateMaxLength(prefix + "的缺口类型", gap.getType(), CatalogLimits.GAP_TYPE_MAX);
+            validateMaxLength(prefix + "的缺口详情", gap.getDetail(), CatalogLimits.GAP_DETAIL_MAX);
         }
     }
 
-    /** 可选字段的列宽校验：null 视为未填写 */
+    /** 可选字段的列宽校验：null 视为未填写；长度按字符（code point）计，与列宽口径一致 */
     private void validateMaxLength(String fieldDesc, String value, int max) {
-        if (value != null && value.length() > max) {
-            throw badRequest(String.format("%s超长：长度 %d，上限 %d", fieldDesc, value.length(), max));
+        if (value == null) {
+            return;
         }
+        int length = textLength(value);
+        if (length > max) {
+            throw badRequest(String.format("%s超长：长度 %d，上限 %d", fieldDesc, length, max));
+        }
+    }
+
+    /**
+     * 文本长度按字符（code point）计：utf8mb4 的 {@code VARCHAR(n)} 约束的是字符数，
+     * 含代理对字符（emoji 等）时 Java 的 {@link String#length()} 会把长度算成两倍。
+     */
+    private int textLength(String value) {
+        return value.codePointCount(0, value.length());
     }
 
     private ResponseStatusException badRequest(String message) {

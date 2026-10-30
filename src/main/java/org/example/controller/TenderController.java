@@ -135,8 +135,10 @@ public class TenderController {
 
                     ### 失败说明
                     - 返回的目录已通过保存前校验（章节编号、必填字段、列宽），可直接调用 `/tender/catalog/save`。
-                    - 模型输出未通过校验（JSON 不合法、章节编号不连续、字段超长等）时，会把原始输出与
-                      失败原因回传模型重新生成一次；重试后仍失败返回 502 Bad Gateway。
+                    - 校验前会先做确定性修正：章节编号按嵌套位置重排，内容提示、结构判断说明、缺口详情
+                      超出列宽时截断，因此编号写错或文本略长不会再触发重新生成。
+                    - 仍不合法（JSON 无法解析、标题为空、层级被压平等）时，把失败原因回传模型重新生成一次；
+                      重试后仍失败返回 502 Bad Gateway。
                     """)
     @PostMapping("/catalog")
     public Mono<CatalogResult> generateCatalog(@RequestBody CatalogRequest request) {
@@ -161,8 +163,10 @@ public class TenderController {
                     ### 失败说明
                     - `previousCatalog` 或 `customPrompt` 为空时返回 400 Bad Request。
                     - 返回的目录已通过保存前校验，可直接调用 `/tender/catalog/save`。
-                    - 模型输出未通过校验（JSON 不合法、章节编号不连续、字段超长等）时，会把原始输出与
-                      失败原因回传模型重新生成一次；重试后仍失败返回 502 Bad Gateway。
+                    - 校验前会先做确定性修正：章节编号按嵌套位置重排，内容提示、结构判断说明、缺口详情
+                      超出列宽时截断，因此编号写错或文本略长不会再触发重新生成。
+                    - 仍不合法（JSON 无法解析、标题为空、层级被压平等）时，把失败原因回传模型重新生成一次；
+                      重试后仍失败返回 502 Bad Gateway。
                     """)
     @PostMapping("/catalog/adjust")
     public Mono<CatalogResult> adjustCatalog(@RequestBody CatalogAdjustRequest request) {
