@@ -23,6 +23,7 @@ llm:
 agentscope:
   workspace-path: .agentscope/workspace
   model: glm-5.2
+  # 从环境变量 AGENTSCOPE_API_KEY 读取，禁止硬编码到代码或配置文件中
   api-key: ${AGENTSCOPE_API_KEY:}
 
 
