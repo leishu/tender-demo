@@ -1,13 +1,13 @@
 package org.example.service;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.example.model.catalog.dto.CatalogResult;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Component;
 import org.springframework.web.server.ResponseStatusException;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.json.JsonMapper;
 
 import java.util.ArrayList;
 
@@ -23,9 +23,9 @@ public class CatalogResultParser {
 
     private static final Logger log = LoggerFactory.getLogger(CatalogResultParser.class);
 
-    private final ObjectMapper mapper;
+    private final JsonMapper mapper;
 
-    public CatalogResultParser(ObjectMapper mapper) {
+    public CatalogResultParser(JsonMapper mapper) {
         this.mapper = mapper;
     }
 
@@ -45,7 +45,7 @@ public class CatalogResultParser {
         CatalogResult result;
         try {
             result = mapper.readValue(json, CatalogResult.class);
-        } catch (JsonProcessingException e) {
+        } catch (JacksonException e) {
             log.error("投标目录 JSON 解析失败，原文：{}", json, e);
             throw new ResponseStatusException(HttpStatus.BAD_GATEWAY, "模型返回的目录 JSON 无法解析", e);
         }
