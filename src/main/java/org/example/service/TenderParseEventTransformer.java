@@ -1,7 +1,5 @@
 package org.example.service;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import io.agentscope.core.event.AgentEvent;
 import io.agentscope.core.event.AgentResultEvent;
 import io.agentscope.core.event.TextBlockDeltaEvent;
@@ -12,6 +10,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Flux;
+import tools.jackson.databind.DeserializationFeature;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.json.JsonMapper;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -41,7 +42,19 @@ public class TenderParseEventTransformer {
             "scoringItem", new DispatchEntry(SCORING_ITEM, ScoringItem.class)
     );
 
-    private final ObjectMapper mapper = new ObjectMapper();
+    /**
+     * 反序列化容错：模型可能输出模型类里没有的字段（如招标概况中的保证金、开标时间等），
+     * 必须忽略未知字段，否则整条事件会因 Unrecognized field 被丢弃。
+     * 基于 Spring 管理的 {@link JsonMapper} 派生，保留全局 JSON 配置。
+     */
+    private final JsonMapper mapper;
+
+    public TenderParseEventTransformer(JsonMapper mapper) {
+        this.mapper = mapper.rebuild()
+                .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
+                .build();
+    }
+
     /**
      * 将 Agent 事件流转换为结构化 SSE 事件流。
      * <ul>
@@ -73,7 +86,7 @@ public class TenderParseEventTransformer {
         });
     }
 
-    private Flux<TenderParseEvent<?>> extractRequirements(StringBuilder buffer, ObjectMapper mapper) {
+    private Flux<TenderParseEvent<?>> extractRequirements(StringBuilder buffer, JsonMapper mapper) {
         List<TenderParseEvent<?>> results = new ArrayList<>();
         String json;
         while ((json = takeFirstCompleteJson(buffer)) != null) {
@@ -94,11 +107,11 @@ public class TenderParseEventTransformer {
         return Flux.fromIterable(results);
     }
 
-    private Map.Entry<String, ? extends TenderModel> dispatch(JsonNode node, ObjectMapper mapper) {
+    private Map.Entry<String, ? extends TenderModel> dispatch(JsonNode node, JsonMapper mapper) {
         if (node == null) {
             return null;
         }
-        DispatchEntry entry = DISPATCH_MAP.get(node.path("entityType").asText());
+        DispatchEntry entry = DISPATCH_MAP.get(node.path("entityType").asString(""));
         if (entry == null) {
             return null;
         }

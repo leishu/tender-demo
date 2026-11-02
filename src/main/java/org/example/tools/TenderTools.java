@@ -4,13 +4,17 @@ import io.agentscope.core.tool.Tool;
 import io.agentscope.core.tool.ToolParam;
 import org.example.model.require.TenderRequirements;
 import org.example.repo.TenderRequirementsRepository;
+import org.example.service.TenderRequirementsService;
 import org.springframework.stereotype.Component;
 
 @Component
 public class TenderTools {
+    private final TenderRequirementsService tenderRequirementsService;
     private final TenderRequirementsRepository tenderRequirementsRepository;
 
-    public TenderTools(TenderRequirementsRepository tenderRequirementsRepository) {
+    public TenderTools(TenderRequirementsService tenderRequirementsService,
+                       TenderRequirementsRepository tenderRequirementsRepository) {
+        this.tenderRequirementsService = tenderRequirementsService;
         this.tenderRequirementsRepository = tenderRequirementsRepository;
     }
 
@@ -19,7 +23,7 @@ public class TenderTools {
     public TenderRequirements saveTenderRequirements(
             @ToolParam(name = "requirements", description = "招标结构化要求对象")
             TenderRequirements requirements) {
-        return tenderRequirementsRepository.save(requirements);
+        return tenderRequirementsService.save(requirements);
     }
 
     @Tool(name = "get_tender_requirements",
