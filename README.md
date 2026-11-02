@@ -102,6 +102,19 @@ curl -N -X POST http://localhost:8080/tender/parse \
   -d '{"userId":"u1","tenderText":"……招标文件正文……"}'
 ```
 
+## 前端工作台
+
+前端位于 `frontend/`，技术栈为 Vue 3 + TypeScript + Vite + Element Plus。
+
+```bash
+cd frontend
+pnpm install
+pnpm dev
+```
+
+开发服务器默认 `http://localhost:5173`，`/tender/` 与 `/knowledge/` 通过 Vite 代理转发到
+`http://localhost:8080`。页面、脚本与接口约定见 [frontend/README.md](frontend/README.md)。
+
 ## 目录结构
 
 ```
@@ -161,6 +174,7 @@ python3 .opencode/skills/code-to-doc-generator/scripts/validate_doc.py \
 
 ## 相关文档
 
+- [前端工作台](frontend/README.md)
 - [详细设计-tender-service](docs/tender-demo/详细设计-tender-service.md)
 - [详细设计-tender-service-project-dev](docs/tender-demo/详细设计-tender-service-project-dev.md)
 - [数据库 ER 图](docs/db/er-diagram.md)
