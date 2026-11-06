@@ -96,7 +96,7 @@
 | `src/main/resources/application.yml` | 49 | `3d2c7b0bc959` | 全部运行配置 |
 | `src/main/java/org/example/controller/TenderController.java` | 138 | `697b48d197a6` | 四个招标接口 |
 | `src/main/java/org/example/service/TenderParseEventTransformer.java` | 152 | `37b7cfa40a0a` | SSE 事件转换核心 |
-| `src/main/java/org/example/repo/KnowledgeBaseRepository.java` | 274 | `dc83f4fbd221` | ES 读写与 RRF 融合 |
+| `../../src/main/java/org/example/knowledge/repo` | 274 | `dc83f4fbd221` | ES 读写与 RRF 融合 |
 
 ### 1.5 参数卡
 

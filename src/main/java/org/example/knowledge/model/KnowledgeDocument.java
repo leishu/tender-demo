@@ -1,4 +1,4 @@
-package org.example.model.knowledge;
+package org.example.knowledge.model;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.swagger.v3.oas.annotations.media.Schema;

@@ -23,10 +23,6 @@ public class TenderRequirements extends TenderModel {
     @Schema(description = "主键ID")
     private Long id;
 
-    /** 企业ID */
-    @Schema(description = "企业ID")
-    private Long enterpriseId;
-
     /** 项目名称 */
     @Schema(description = "项目名称")
     private String projectName;

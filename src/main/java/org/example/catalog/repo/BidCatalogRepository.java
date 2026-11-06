@@ -77,13 +77,12 @@ public class BidCatalogRepository {
      *
      * @return 新批次的 t_bid_catalog_run 主键
      */
-    public Long replace(Long tenderRequirementId, Long enterpriseId, CatalogResult result) {
+    public Long replace(Long tenderRequirementId, CatalogResult result) {
         deleteByTenderRequirementId(tenderRequirementId);
 
         long now = System.currentTimeMillis();
         BidCatalogRun run = new BidCatalogRun();
         run.setTenderRequirementId(tenderRequirementId);
-        run.setEnterpriseId(enterpriseId);
         run.setSplitFlag(result.isSplit());
         run.setStructureDecision(truncate(result.getStructureDecision(), STRUCTURE_DECISION_MAX));
         run.setCreatedAt(now);

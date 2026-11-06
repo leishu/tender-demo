@@ -1,12 +1,12 @@
-package org.example.tools;
+package org.example.enterprise.tool;
 
 import io.agentscope.core.tool.Tool;
 import io.agentscope.core.tool.ToolParam;
 
-import org.example.model.Personnel;
-import org.example.model.ProjectPerformance;
-import org.example.model.Qualification;
-import org.example.repo.EnterpriseRepository;
+import org.example.enterprise.model.Personnel;
+import org.example.enterprise.model.ProjectPerformance;
+import org.example.enterprise.model.Qualification;
+import org.example.enterprise.repo.EnterpriseRepository;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
@@ -36,9 +36,12 @@ public class EnterpriseDataTools {
     }
 
     @Tool(name = "query_personnel",
-            description = "查询企业人员及其资质证书。当需要确认项目团队配置时调用。")
+            description = "查询企业人员及其可担任岗位、证书与职称。返回的每个人含 gender/birthDate/yearsOfExperience、"
+                    + "roles（可担任岗位数组，一人可多岗）与 certificates（证书数组，一人多张；"
+                    + "职称也是其中一条，type 为「职称」，major 为专业）。"
+                    + "当需要确认项目团队配置、核对职称或证书要求时调用。")
     public List<Personnel> queryPersonnel(
-            @ToolParam(name = "role", description = "角色，如'项目经理'")
+            @ToolParam(name = "role", description = "岗位关键词，如'项目经理'。按关键词模糊匹配，不传则返回全部人员")
             String role) {
         return repository.findPersonnel(role);
     }

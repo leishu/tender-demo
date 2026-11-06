@@ -7,7 +7,6 @@
 type QualificationRequirement = {
   id?: number
   tenderRequirementId?: number
-  enterpriseId?: number
   type?: string
   level?: string
   validRequirement?: string
@@ -18,7 +17,6 @@ type QualificationRequirement = {
 type PerformanceRequirement = {
   id?: number
   tenderRequirementId?: number
-  enterpriseId?: number
   projectType?: string
   quantity?: string
   amount?: string
@@ -30,7 +28,6 @@ type PerformanceRequirement = {
 type PersonnelRequirement = {
   id?: number
   tenderRequirementId?: number
-  enterpriseId?: number
   role?: string
   quantity?: number
   certificate?: string
@@ -41,7 +38,6 @@ type PersonnelRequirement = {
 type ScoringItem = {
   id?: number
   tenderRequirementId?: number
-  enterpriseId?: number
   itemId?: string
   name?: string
   score?: number
@@ -53,7 +49,6 @@ type ScoringItem = {
 
 type TenderRequirements = {
   id?: number
-  enterpriseId?: number
   projectName?: string
   location?: string
   duration?: string

@@ -23,10 +23,6 @@ public class PerformanceRequirement extends TenderModel {
     @Schema(description = "关联的 TenderRequirements 主键")
     private Long tenderRequirementId;
 
-    /** 企业ID */
-    @Schema(description = "企业ID")
-    private Long enterpriseId;
-
     /** 类似项目类型描述 */
     @Schema(description = "类似项目类型描述", example = "公共建筑工程施工总承包")
     private String projectType;

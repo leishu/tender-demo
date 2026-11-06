@@ -23,10 +23,6 @@ public class ScoringItem extends TenderModel {
     @Schema(description = "关联的 TenderRequirements 主键")
     private Long tenderRequirementId;
 
-    /** 企业ID */
-    @Schema(description = "企业ID")
-    private Long enterpriseId;
-
     /** 评分点 id */
     @Schema(description = "评分点 id", example = "SC-01")
     private String itemId;

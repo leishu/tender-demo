@@ -1,4 +1,4 @@
-package org.example.repo;
+package org.example.knowledge.repo;
 
 import co.elastic.clients.elasticsearch.ElasticsearchClient;
 import co.elastic.clients.elasticsearch._types.ElasticsearchException;
@@ -12,8 +12,8 @@ import co.elastic.clients.elasticsearch.core.SearchResponse;
 import co.elastic.clients.elasticsearch.core.bulk.BulkResponseItem;
 import lombok.extern.slf4j.Slf4j;
 import org.example.config.KnowledgeBaseProperties;
-import org.example.model.knowledge.KnowledgeDocument;
-import org.example.model.knowledge.KnowledgeSearchHit;
+import org.example.knowledge.model.KnowledgeDocument;
+import org.example.knowledge.model.KnowledgeSearchHit;
 import org.springframework.stereotype.Repository;
 
 import java.io.IOException;

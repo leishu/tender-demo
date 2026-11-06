@@ -113,7 +113,7 @@ public class TenderController {
      * 确认解析结果并入库存档，返回入库后的主键 id
      */
     @Operation(summary = "确认解析结果并入库",
-            description = "将确认后的解析结果写入数据库，并返回入库后的主键 id。未传入 enterpriseId 时由服务端归入默认企业。")
+            description = "将确认后的解析结果写入数据库，并返回入库后的主键 id。")
     @PostMapping("/parse/confirm")
     public Mono<Long> confirmTender(@RequestBody TenderRequirements requirements) {
         return Mono.fromCallable(() -> requirementService.save(requirements).getId());

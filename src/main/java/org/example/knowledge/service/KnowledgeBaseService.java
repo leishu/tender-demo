@@ -1,15 +1,15 @@
-package org.example.service;
+package org.example.knowledge.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import lombok.extern.slf4j.Slf4j;
 import org.example.client.EmbeddingClient;
 import org.example.client.EmbeddingException;
 import org.example.config.KnowledgeBaseProperties;
-import org.example.mapper.KnowledgeBaseMapper;
-import org.example.model.knowledge.KnowledgeBase;
-import org.example.model.knowledge.KnowledgeDocument;
-import org.example.model.knowledge.KnowledgeSearchHit;
-import org.example.repo.KnowledgeBaseRepository;
+import org.example.knowledge.mapper.KnowledgeBaseMapper;
+import org.example.knowledge.model.KnowledgeBase;
+import org.example.knowledge.model.KnowledgeDocument;
+import org.example.knowledge.model.KnowledgeSearchHit;
+import org.example.knowledge.repo.KnowledgeBaseRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;

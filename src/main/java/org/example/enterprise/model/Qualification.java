@@ -1,4 +1,4 @@
-package org.example.model;
+package org.example.enterprise.model;
 
 import com.baomidou.mybatisplus.annotation.IdType;
 import com.baomidou.mybatisplus.annotation.TableId;
@@ -15,10 +15,6 @@ public class Qualification {
     @TableId(type = IdType.AUTO)
     @Schema(description = "主键ID")
     private Long id;
-
-    /** 企业ID */
-    @Schema(description = "企业ID")
-    private Long enterpriseId;
 
     /** 资质类型，如 ISO9001 */
     @Schema(description = "资质类型，如 ISO9001", example = "ISO9001")

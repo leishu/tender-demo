@@ -23,10 +23,6 @@ public class QualificationRequirement extends TenderModel {
     @Schema(description = "关联的 TenderRequirements 主键")
     private Long tenderRequirementId;
 
-    /** 企业ID */
-    @Schema(description = "企业ID")
-    private Long enterpriseId;
-
     /** 资质类型，如 ISO9001、施工总承包一级 */
     @Schema(description = "资质类型，如 ISO9001、施工总承包一级", example = "施工总承包一级")
     private String type;

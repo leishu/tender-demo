@@ -28,8 +28,7 @@ public class BidCatalogService {
      */
     @Transactional(readOnly = true)
     public CatalogResult find(Long tenderRequirementId) {
-        Long enterpriseId = requirementRepository.findEnterpriseId(tenderRequirementId);
-        if (enterpriseId == null) {
+        if (!requirementRepository.existsById(tenderRequirementId)) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND,
                     "招标要求不存在：" + tenderRequirementId);
         }
@@ -48,11 +47,10 @@ public class BidCatalogService {
     @Transactional
     public Long save(Long tenderRequirementId, CatalogResult result) {
         catalogValidator.validate(result);
-        Long enterpriseId = requirementRepository.findEnterpriseId(tenderRequirementId);
-        if (enterpriseId == null) {
+        if (!requirementRepository.existsById(tenderRequirementId)) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND,
                     "招标要求不存在：" + tenderRequirementId);
         }
-        return bidCatalogRepository.replace(tenderRequirementId, enterpriseId, result);
+        return bidCatalogRepository.replace(tenderRequirementId, result);
     }
 }

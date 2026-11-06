@@ -1,4 +1,4 @@
-package org.example.model;
+package org.example.enterprise.model;
 
 
 import com.baomidou.mybatisplus.annotation.IdType;
@@ -17,10 +17,6 @@ public class ProjectPerformance {
     @TableId(type = IdType.AUTO)
     @Schema(description = "主键ID")
     private Long id;
-
-    /** 企业ID */
-    @Schema(description = "企业ID")
-    private Long enterpriseId;
 
     /** 项目名称 */
     @Schema(description = "项目名称", example = "XX 产业园一期工程施工总承包")

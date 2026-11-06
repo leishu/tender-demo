@@ -23,10 +23,6 @@ public class PersonnelRequirement extends TenderModel {
     @Schema(description = "关联的 TenderRequirements 主键")
     private Long tenderRequirementId;
 
-    /** 企业ID */
-    @Schema(description = "企业ID")
-    private Long enterpriseId;
-
     /** 岗位名称，如 项目经理、技术负责人 */
     @Schema(description = "岗位名称，如 项目经理、技术负责人", example = "项目经理")
     private String role;

@@ -951,9 +951,9 @@ curl -G http://localhost:8080/knowledge/search \
 | 智能体装配 | 运行时 | `src/main/java/org/example/config/TenderAgentConfig.java` | 模型、工具、工作区、审计 |
 | 招标工具 | 工具集 | `src/main/java/org/example/tools/TenderTools.java` | 招标要求读写删 |
 | 企业数据工具 | 工具集 | `src/main/java/org/example/tools/EnterpriseDataTools.java` | 资质、业绩、人员查询 |
-| 招标持久化 | 数据访问 | `src/main/java/org/example/repo/TenderRequirementsRepository.java` | 五表写入与级联删除 |
+| 招标持久化 | 数据访问 | `../../src/main/java/org/example/knowledge/repo` | 五表写入与级联删除 |
 | 知识库编排 | 业务编排 | `src/main/java/org/example/service/KnowledgeBaseService.java` | 写入、检索、降级 |
-| 检索访问 | 数据访问 | `src/main/java/org/example/repo/KnowledgeBaseRepository.java` | 索引、批量写入、融合 |
+| 检索访问 | 数据访问 | `../../src/main/java/org/example/knowledge/repo` | 索引、批量写入、融合 |
 | 向量通道 | 外部客户端 | `src/main/java/org/example/client/EsInferenceEmbeddingClient.java` | 检索服务内置向量 |
 | 备选向量通道 | 外部客户端 | `src/main/java/org/example/client/DashScopeEmbeddingClient.java` | 外部向量服务 |
 | 审计中间件 | 运行时 | `src/main/java/org/example/middleware/ModelCallAuditMiddleware.java` | 记录模型调用 |

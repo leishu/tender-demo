@@ -25,10 +25,6 @@ public class BidCatalogRun {
     @Schema(description = "关联的招标要求主键", example = "1")
     private Long tenderRequirementId;
 
-    /** 企业ID */
-    @Schema(description = "企业ID")
-    private Long enterpriseId;
-
     /** 是否商务/技术分列 */
     @Schema(description = "是否商务/技术分列：false 合并目录，true 分列")
     private Boolean splitFlag;

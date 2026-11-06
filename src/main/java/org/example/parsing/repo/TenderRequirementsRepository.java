@@ -44,10 +44,10 @@ public class TenderRequirementsRepository {
         normalize(requirements);
         tenderRequirementsMapper.insert(requirements);
         Long reqId = requirements.getId();
-        saveQualifications(reqId, requirements.getEnterpriseId(), requirements.getQualifications());
-        savePerformances(reqId, requirements.getEnterpriseId(), requirements.getPerformances());
-        savePersonnel(reqId, requirements.getEnterpriseId(), requirements.getPersonnel());
-        saveScoringItems(reqId, requirements.getEnterpriseId(), requirements.getScoringItems());
+        saveQualifications(reqId, requirements.getQualifications());
+        savePerformances(reqId, requirements.getPerformances());
+        savePersonnel(reqId, requirements.getPersonnel());
+        saveScoringItems(reqId, requirements.getScoringItems());
         return requirements;
     }
 
@@ -64,10 +64,9 @@ public class TenderRequirementsRepository {
         return requirements;
     }
 
-    /** 按 id 查询所属企业ID，不存在时返回 null */
-    public Long findEnterpriseId(Long id) {
-        TenderRequirements requirements = tenderRequirementsMapper.selectById(id);
-        return requirements == null ? null : requirements.getEnterpriseId();
+    /** 判断招标要求是否存在 */
+    public boolean existsById(Long id) {
+        return id != null && tenderRequirementsMapper.selectById(id) != null;
     }
 
     /** 按 id 删除，连同子表一并删除 */
@@ -83,49 +82,45 @@ public class TenderRequirementsRepository {
         tenderRequirementsMapper.deleteById(id);
     }
 
-    private void saveQualifications(Long reqId, Long enterpriseId, List<QualificationRequirement> list) {
+    private void saveQualifications(Long reqId, List<QualificationRequirement> list) {
         if (CollectionUtils.isEmpty(list)) {
             return;
         }
         for (QualificationRequirement item : list) {
             item.setTenderRequirementId(reqId);
-            item.setEnterpriseId(enterpriseId);
             normalize(item);
             qualificationRequirementMapper.insert(item);
         }
     }
 
-    private void savePerformances(Long reqId, Long enterpriseId, List<PerformanceRequirement> list) {
+    private void savePerformances(Long reqId, List<PerformanceRequirement> list) {
         if (CollectionUtils.isEmpty(list)) {
             return;
         }
         for (PerformanceRequirement item : list) {
             item.setTenderRequirementId(reqId);
-            item.setEnterpriseId(enterpriseId);
             normalize(item);
             performanceRequirementMapper.insert(item);
         }
     }
 
-    private void savePersonnel(Long reqId, Long enterpriseId, List<PersonnelRequirement> list) {
+    private void savePersonnel(Long reqId, List<PersonnelRequirement> list) {
         if (CollectionUtils.isEmpty(list)) {
             return;
         }
         for (PersonnelRequirement item : list) {
             item.setTenderRequirementId(reqId);
-            item.setEnterpriseId(enterpriseId);
             normalize(item);
             personnelRequirementMapper.insert(item);
         }
     }
 
-    private void saveScoringItems(Long reqId, Long enterpriseId, List<ScoringItem> list) {
+    private void saveScoringItems(Long reqId, List<ScoringItem> list) {
         if (CollectionUtils.isEmpty(list)) {
             return;
         }
         for (ScoringItem item : list) {
             item.setTenderRequirementId(reqId);
-            item.setEnterpriseId(enterpriseId);
             normalize(item);
             scoringItemMapper.insert(item);
         }

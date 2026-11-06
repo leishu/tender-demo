@@ -23,13 +23,11 @@
 CREATE TABLE `t_bid_catalog_run` (
     `id`                    BIGINT       NOT NULL AUTO_INCREMENT COMMENT '主键ID',
     `tender_requirement_id` BIGINT       NOT NULL COMMENT '关联的 t_tender_requirements 主键',
-    `enterprise_id`         INT          NOT NULL COMMENT '企业ID（同 t_tender_requirements.enterprise_id）',
     `split_flag`            TINYINT(1)   NOT NULL DEFAULT 0 COMMENT '是否商务/技术分列：0 合并目录，1 分列',
     `structure_decision`    VARCHAR(512) NULL COMMENT '结构判断说明：合并目录 / 商务技术分列及一句依据',
     `created_at`            BIGINT       NOT NULL COMMENT '创建时间(epoch ms)',
     PRIMARY KEY (`id`),
-    UNIQUE KEY `uk_tender_requirement_id` (`tender_requirement_id`),
-    KEY `idx_enterprise_id` (`enterprise_id`)
+    UNIQUE KEY `uk_tender_requirement_id` (`tender_requirement_id`)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT = '投标目录生成批次（结构判断结果）';
 
 
