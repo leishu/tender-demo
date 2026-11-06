@@ -20,7 +20,7 @@ import reactor.core.scheduler.Schedulers;
 
 import java.util.List;
 
-@Tag(name = "招标文件解析与投标生成")
+@Tag(name = "投标文件目录")
 @RestController
 @RequestMapping("/tender")
 public class CatalogController {
