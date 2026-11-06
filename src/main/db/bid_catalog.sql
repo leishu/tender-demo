@@ -1,5 +1,5 @@
 -- =====================================================================
--- 投标目录相关表（对应 org.example.model.catalog 下的 CatalogResult / CatalogNode / CatalogGap）
+-- 投标目录相关表（对应 org.example.catalog.model 下的 CatalogResult / CatalogNode / CatalogGap）
 --
 --   CatalogResult.catalog / businessCatalog / technicalCatalog
 --                              -> t_bid_catalog（按 catalog_category 区分归属）
