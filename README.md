@@ -44,6 +44,12 @@ mysql -u root -p tender_demo < src/main/db/knowledge_base.sql
 mysql -u root -p tender_demo < src/main/db/bid_catalog.sql
 ```
 
+企业资质与人员的测试数据（可选，仅测试环境使用，会先清空这四张表）：
+
+```bash
+mysql -u root -p tender_demo < src/main/db/test-data-qualification-personnel.sql
+```
+
 ### 3. 修改配置
 
 配置位于 `src/main/resources/application.yml`，主要项：
