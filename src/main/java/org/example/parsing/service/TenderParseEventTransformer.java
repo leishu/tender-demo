@@ -6,6 +6,7 @@ import io.agentscope.core.event.TextBlockDeltaEvent;
 import org.example.parsing.model.*;
 import org.example.parsing.model.dto.ParseModule;
 import org.example.parsing.model.dto.TenderParseEvent;
+import org.example.util.JsonStreamExtractor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -89,7 +90,7 @@ public class TenderParseEventTransformer {
     private Flux<TenderParseEvent<?>> extractRequirements(StringBuilder buffer, JsonMapper mapper) {
         List<TenderParseEvent<?>> results = new ArrayList<>();
         String json;
-        while ((json = takeFirstCompleteJson(buffer)) != null) {
+        while ((json = JsonStreamExtractor.takeFirstCompleteJson(buffer)) != null) {
             try {
                 JsonNode node = mapper.readTree(json);
                 Map.Entry<String, ? extends TenderModel> entry = dispatch(node, mapper);
@@ -118,48 +119,4 @@ public class TenderParseEventTransformer {
         return Map.entry(entry.module().getCode(), mapper.convertValue(node, entry.type()));
     }
 
-    /**
-     * 从缓冲前部取走第一个完整闭合的 JSON 对象原文（带字符串感知的大括号配对），取不到返回 {@code null}。
-     */
-    private String takeFirstCompleteJson(StringBuilder buffer) {
-        int depth = 0;
-        int start = -1;
-        boolean inString = false;
-        boolean escaped = false;
-        for (int i = 0; i < buffer.length(); i++) {
-            char c = buffer.charAt(i);
-            if (inString) {
-                if (escaped) {
-                    escaped = false;
-                } else if (c == '\\') {
-                    escaped = true;
-                } else if (c == '"') {
-                    inString = false;
-                }
-                continue;
-            }
-            switch (c) {
-                case '"':
-                    inString = true;
-                    break;
-                case '{':
-                    if (depth == 0) {
-                        start = i;
-                    }
-                    depth++;
-                    break;
-                case '}':
-                    depth--;
-                    if (depth == 0 && start >= 0) {
-                        String json = buffer.substring(start, i + 1);
-                        buffer.delete(start, i + 1);
-                        return json;
-                    }
-                    break;
-                default:
-                    break;
-            }
-        }
-        return null;
-    }
 }

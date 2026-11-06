@@ -20,8 +20,11 @@
 - **解析结果入库**：`POST /tender/parse/confirm`，主表 + 资质/业绩/人员/评分点四张子表持久化。
 - **投标目录生成**：`POST /tender/catalog`，输出最多三级的目录 JSON，支持商务/技术分列。
 - **章节撰写**：`POST /tender/chapter`，结合评分点生成章节正文。
+- **人员与企业资质匹配**：`POST /tender/match`，并发调度 `personnel-matcher` 与 `qualification-matcher`
+  两个子 Agent，匹配完一条就通过 SSE 推送一条，全部结束后推送 `completed`。
 - **知识库**：`POST /knowledge/{knowledgeBaseName}` 批量写入并向量化，`GET /knowledge/search` 混合检索。
-- **Agent 编排**：主 Agent 调度 `tender-parser`、`catalog-builder`、`chapter-writer` 子 Agent，规则见工作区 `AGENTS.md`。
+- **Agent 编排**：主 Agent 调度 `tender-parser`、`catalog-builder`、`chapter-writer`、
+  `personnel-matcher`、`qualification-matcher` 子 Agent，规则见工作区 `AGENTS.md`。
 
 ## 快速开始
 
@@ -106,6 +109,12 @@ curl -N -X POST http://localhost:8080/tender/parse \
   -H "Content-Type: application/json" \
   -H "Accept: text/event-stream" \
   -d '{"userId":"u1","tenderText":"……招标文件正文……"}'
+
+# 人员 + 企业资质并发匹配（tenderRequirementId 来自 /tender/parse/confirm）
+curl -N -X POST http://localhost:8080/tender/match \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{"userId":"u1","tenderRequirementId":1234567890}'
 ```
 
 ## 前端工作台
@@ -125,7 +134,8 @@ pnpm dev
 
 ```
 src/main/java/org/example
-├── controller/   # TenderController、KnowledgeBaseController
+├── controller/   # TenderController、MatchingController、KnowledgeBaseController
+├── matching/     # 人员/企业资质匹配编排、SSE 事件转换与匹配模型
 ├── service/      # 解析事件转换、解析结果持久化、知识库、工作区初始化
 ├── repo/         # 仓储层（MyBatis-Plus + ES 检索）
 ├── mapper/       # MyBatis-Plus Mapper

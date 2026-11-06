@@ -7,6 +7,8 @@
 - **tender-parser**：解析招标文件，提取结构化要求。任何涉及“读懂招标文件”的任务，必须委派给它。
 - **catalog-builder**：根据解析结果生成投标文件目录骨架。在 tender-parser 返回结构化要求后调用。
 - **chapter-writer**：根据目录条目和招标要求撰写具体章节内容。在目录确定后，逐章调用。
+- **personnel-matcher**：把招标关键人员要求与企业人员库逐条匹配，输出候选人、证书/职称与有效期核对结果。
+- **qualification-matcher**：把招标企业资质要求与企业资质库逐条匹配，输出候选资质、等级与有效期核对结果。
 
 ## 调度规则
 
@@ -16,6 +18,10 @@
 4. 拿到完整解析结果后，委派 catalog-builder 生成目录。如果目录条目与评分点不匹配，让 catalog-builder 修正。
 5. 目录确认后，对每个章节条目逐次委派 chapter-writer。章节撰写必须引用 tender-parser 输出的对应评分点作为写作依据。
 6. 每章撰写完成后，对照 tender-parser 的评分点清单自查：该章是否覆盖了所有相关评分点？不覆盖则带着具体缺口退回 chapter-writer 重写。
+7. 用户要求做人员匹配或企业资质匹配时，分别委派 `personnel-matcher` 与 `qualification-matcher`。
+   两类匹配互不依赖，必须并行发起（多个 `agent_spawn` 同轮调用，或 `timeout_seconds=0`
+   后台并发），不要串行等待。每拿到一条匹配结果就向用户呈现一条，全部结束后再汇总结论。
+8. 匹配结果只能来自子 Agent 调用工具后的返回数据；不得由主 Agent 自行推断或补写人员、资质。
 
 ## 输出约束
 
