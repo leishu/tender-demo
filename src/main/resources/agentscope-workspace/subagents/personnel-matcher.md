@@ -68,6 +68,8 @@ steps: 8
 ```
 
 - `requirementId` 必须原样使用输入 JSON 中的 `id`。
+- 字符串值内部**不要直接写英文双引号**：需要引用原文中的岗位或证书名称时改用中文引号（“”），
+  若必须使用英文双引号则写成 `\"`，否则 JSON 结构会被破坏、该条结果将被丢弃。
 - 没有候选人时 `candidates` 输出 `[]`，`matchedCount` 输出 `0`，`status` 输出 `UNMATCHED`。
 - `eligible=false` 的候选人也可以保留在 `candidates` 中，用于说明“为什么没人满足”，但不得计入 `matchedCount`。
 

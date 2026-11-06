@@ -28,6 +28,9 @@ public class TenderRequirementSummary {
     @Schema(description = "预算 / 报价上限")
     private String budget;
 
+    @Schema(description = "录入时间（epoch 毫秒），列表按此字段倒序")
+    private Long recordTime;
+
     @Schema(description = "资质要求条数")
     private int qualificationCount;
 

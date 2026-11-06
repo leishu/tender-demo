@@ -4,7 +4,9 @@ CREATE TABLE `t_tender_requirements` (
     `location`      VARCHAR(255) NULL COMMENT '建设地点',
     `duration`      VARCHAR(64)  NULL COMMENT '工期要求，如“180 日历天”',
     `budget`        VARCHAR(128) NULL COMMENT '预算/报价上限（金额+币种）',
-    PRIMARY KEY (`id`)
+    `record_time`   BIGINT       NOT NULL COMMENT '录入时间(epoch ms)，列表按此字段倒序',
+    PRIMARY KEY (`id`),
+    KEY `idx_record_time` (`record_time`)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT = '招标文件结构化要求';
 
 

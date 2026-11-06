@@ -66,6 +66,7 @@ type TenderRequirementSummary = {
   location?: string
   duration?: string
   budget?: string
+  recordTime?: number
   qualificationCount?: number
   performanceCount?: number
   personnelCount?: number

@@ -50,6 +50,8 @@ public class TenderRequirementsRepository {
      */
     public TenderRequirements save(TenderRequirements requirements) {
         normalize(requirements);
+        // 录入时间统一由服务端写入，避免调用方漏传或传入客户端时间
+        requirements.setRecordTime(System.currentTimeMillis());
         tenderRequirementsMapper.insert(requirements);
         Long reqId = requirements.getId();
         saveQualifications(reqId, requirements.getQualifications());
@@ -78,7 +80,7 @@ public class TenderRequirementsRepository {
     }
 
     /**
-     * 查询已解析招标文件的列表项，按主键倒序（最近入库在前）。
+     * 查询已解析招标文件的列表项，按录入时间倒序（最近录入在前），录入时间相同时按主键倒序兜底。
      *
      * @param keyword 项目名称模糊匹配关键字，为空时不过滤
      * @param limit   返回条数上限，调用方需保证已做合法区间校验
@@ -89,11 +91,14 @@ public class TenderRequirementsRepository {
                         TenderRequirements::getProjectName,
                         TenderRequirements::getLocation,
                         TenderRequirements::getDuration,
-                        TenderRequirements::getBudget);
+                        TenderRequirements::getBudget,
+                        TenderRequirements::getRecordTime);
         if (StringUtils.hasText(keyword)) {
             wrapper.like(TenderRequirements::getProjectName, keyword.trim());
         }
-        wrapper.orderByDesc(TenderRequirements::getId).last("LIMIT " + limit);
+        wrapper.orderByDesc(TenderRequirements::getRecordTime)
+                .orderByDesc(TenderRequirements::getId)
+                .last("LIMIT " + limit);
 
         List<TenderRequirements> rows = tenderRequirementsMapper.selectList(wrapper);
         if (rows.isEmpty()) {
@@ -114,6 +119,7 @@ public class TenderRequirementsRepository {
             summary.setLocation(row.getLocation());
             summary.setDuration(row.getDuration());
             summary.setBudget(row.getBudget());
+            summary.setRecordTime(row.getRecordTime());
             summary.setQualificationCount(qualificationCounts.getOrDefault(row.getId(), 0));
             summary.setPerformanceCount(performanceCounts.getOrDefault(row.getId(), 0));
             summary.setPersonnelCount(personnelCounts.getOrDefault(row.getId(), 0));

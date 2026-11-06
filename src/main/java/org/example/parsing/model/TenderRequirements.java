@@ -36,6 +36,10 @@ public class TenderRequirements extends TenderModel {
     @Schema(description = "预算 / 报价上限（金额 + 币种）")
     private String budget;
 
+    /** 录入时间（epoch 毫秒），入库时由服务端写入，列表按此字段倒序 */
+    @Schema(description = "录入时间（epoch 毫秒），入库时由服务端写入")
+    private Long recordTime;
+
     /** 资质要求清单（非数据库列，子表单独维护） */
     @TableField(exist = false)
     @Schema(description = "资质要求清单")

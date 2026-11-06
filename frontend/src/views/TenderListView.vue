@@ -5,6 +5,7 @@ import { Files, Plus, Refresh, Search, UserFilled } from '@element-plus/icons-vu
 import { tenderApi } from '@/api/tender'
 import { useAsyncTask } from '@/composables/useAsyncTask'
 import { useWorkflowStore } from '@/stores/workflow'
+import { formatDateTime } from '@/utils/async'
 import type { TenderRequirementSummary } from '@/api/types'
 
 const router = useRouter()
@@ -177,6 +178,12 @@ onMounted(load)
         <el-table-column label="预算" min-width="150">
           <template #default="{ row }">
             <span class="muted">{{ display(row.budget) }}</span>
+          </template>
+        </el-table-column>
+
+        <el-table-column label="录入时间" width="180">
+          <template #default="{ row }">
+            <span class="muted mono">{{ formatDateTime(row.recordTime) }}</span>
           </template>
         </el-table-column>
 

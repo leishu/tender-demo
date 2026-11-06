@@ -102,7 +102,7 @@ public class TenderController {
 
     @Operation(summary = "查询已解析的招标文件列表",
             description = """
-                    查询已确认入库的招标文件（招标要求），按主键倒序返回，供列表页展示并选择后续操作。
+                    查询已确认入库的招标文件（招标要求），按录入时间倒序返回，供列表页展示并选择后续操作。
 
                     ### 参数
                     - `keyword`：项目名称模糊匹配，可选
@@ -111,10 +111,11 @@ public class TenderController {
                     ### 响应说明
                     - `id`：招标要求主键，人员/资质匹配、目录生成都使用该 id
                     - `projectName` / `location` / `duration` / `budget`：解析出的项目概况
+                    - `recordTime`：录入时间（epoch 毫秒），由服务端在入库时写入
                     - `qualificationCount` / `performanceCount` / `personnelCount` / `scoringItemCount`：各类要求条数
                     - `hasCatalog`：是否已保存过投标目录
 
-                    说明：主表未记录入库时间，列表以自增主键倒序近似“最近入库在前”。
+                    说明：列表按 `record_time` 倒序，同一毫秒录入的多条按主键倒序兜底。
                     """)
     @GetMapping("/requirements")
     public Mono<List<TenderRequirementSummary>> listRequirements(
