@@ -21,6 +21,7 @@ import org.springframework.util.CollectionUtils;
 import org.springframework.util.StringUtils;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -148,9 +149,28 @@ public class BidCatalogRepository {
         return result;
     }
 
-    /** 删除指定招标要求下的目录批次及其章节、评分点关联、缺口 */
-    public void deleteByTenderRequirementId(Long tenderRequirementId) {
+    /**
+     * 查询给定招标要求中已保存过目录的 id 集合，供列表页展示"是否已生成目录"。
+     * 一个招标要求最多一条批次记录，因此直接按主键条件查询即可。
+     */
+    public Set<Long> findTenderRequirementIdsWithCatalog(Collection<Long> tenderRequirementIds) {
+        if (CollectionUtils.isEmpty(tenderRequirementIds)) {
+            return Set.of();
+        }
         List<BidCatalogRun> runs = runMapper.selectList(new LambdaQueryWrapper<BidCatalogRun>()
+                .select(BidCatalogRun::getTenderRequirementId)
+                .in(BidCatalogRun::getTenderRequirementId, tenderRequirementIds));
+        Set<Long> ids = new HashSet<>();
+        for (BidCatalogRun run : runs) {
+            if (run.getTenderRequirementId() != null) {
+                ids.add(run.getTenderRequirementId());
+            }
+        }
+        return ids;
+    }
+
+    /** 删除指定招标要求下的目录批次及其章节、评分点关联、缺口 */
+    public void deleteByTenderRequirementId(Long tenderRequirementId) {        List<BidCatalogRun> runs = runMapper.selectList(new LambdaQueryWrapper<BidCatalogRun>()
                 .eq(BidCatalogRun::getTenderRequirementId, tenderRequirementId));
         if (runs.isEmpty()) {
             return;

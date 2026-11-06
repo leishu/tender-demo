@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { computed, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Check, FolderOpened, MagicStick, View } from '@element-plus/icons-vue'
 import CatalogTree from '@/features/catalog/CatalogTree.vue'
@@ -16,6 +16,7 @@ interface CatalogTab {
 }
 
 const router = useRouter()
+const route = useRoute()
 const workflow = useWorkflowStore()
 
 const { loading: generateLoading, error: generateError, run: runGenerate } = useAsyncTask()
@@ -155,6 +156,17 @@ async function save() {
 function goParse() {
   router.push('/parse')
 }
+
+function goTenders() {
+  router.push('/tenders')
+}
+
+// 从「招标文件列表」点击“查看目录”进入时自动读取已保存的目录
+onMounted(() => {
+  if (route.query.load === 'saved' && workflow.tenderRequirementId) {
+    void loadSaved()
+  }
+})
 </script>
 
 <template>
@@ -172,8 +184,9 @@ function goParse() {
     </div>
 
     <el-card v-if="!workflow.tenderRequirementId" shadow="never" class="panel">
-      <el-empty description="请先在「招标解析」中完成解析并确认入库">
-        <el-button type="primary" @click="goParse">去解析招标文件</el-button>
+      <el-empty description="请先在「招标文件」中解析并确认入库，或在列表中选择一份已有文件">
+        <el-button type="primary" @click="goTenders">从列表选择</el-button>
+        <el-button @click="goParse">去解析招标文件</el-button>
       </el-empty>
     </el-card>
 

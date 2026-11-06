@@ -2,7 +2,15 @@
 import { computed, markRaw } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Document, EditPen, Files, RefreshLeft, Search } from '@element-plus/icons-vue'
+import {
+  Document,
+  EditPen,
+  Files,
+  FolderOpened,
+  RefreshLeft,
+  Search,
+  UserFilled,
+} from '@element-plus/icons-vue'
 import { useWorkflowStore } from '@/stores/workflow'
 
 const route = useRoute()
@@ -10,7 +18,9 @@ const router = useRouter()
 const workflow = useWorkflowStore()
 
 const navItems = [
+  { path: '/tenders', label: '招标文件', icon: markRaw(FolderOpened) },
   { path: '/parse', label: '招标解析', icon: markRaw(Document) },
+  { path: '/match', label: '人员与资质匹配', icon: markRaw(UserFilled) },
   { path: '/catalog', label: '投标目录', icon: markRaw(Files) },
   { path: '/chapter', label: '章节撰写', icon: markRaw(EditPen) },
   { path: '/knowledge-base', label: '知识库', icon: markRaw(Search) },

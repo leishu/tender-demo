@@ -9,7 +9,13 @@ const router = createRouter({
       children: [
         {
           path: '',
-          redirect: '/parse',
+          redirect: '/tenders',
+        },
+        {
+          path: 'tenders',
+          name: 'tenders',
+          component: () => import('@/views/TenderListView.vue'),
+          meta: { title: '招标文件列表' },
         },
         {
           path: 'parse',
@@ -28,6 +34,12 @@ const router = createRouter({
           name: 'chapter',
           component: () => import('@/views/ChapterView.vue'),
           meta: { title: '章节撰写' },
+        },
+        {
+          path: 'match',
+          name: 'match',
+          component: () => import('@/views/MatchView.vue'),
+          meta: { title: '人员与资质匹配' },
         },
         {
           path: 'knowledge-base',

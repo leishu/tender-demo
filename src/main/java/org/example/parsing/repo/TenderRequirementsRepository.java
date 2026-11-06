@@ -1,6 +1,8 @@
 package org.example.parsing.repo;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import org.example.parsing.mapper.PerformanceRequirementMapper;
 import org.example.parsing.mapper.PersonnelRequirementMapper;
 import org.example.parsing.mapper.QualificationRequirementMapper;
@@ -11,10 +13,16 @@ import org.example.parsing.model.PersonnelRequirement;
 import org.example.parsing.model.QualificationRequirement;
 import org.example.parsing.model.ScoringItem;
 import org.example.parsing.model.TenderRequirements;
+import org.example.parsing.model.dto.TenderRequirementSummary;
 import org.springframework.stereotype.Repository;
 import org.springframework.util.CollectionUtils;
+import org.springframework.util.StringUtils;
 
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 @Repository
 public class TenderRequirementsRepository {
@@ -67,6 +75,52 @@ public class TenderRequirementsRepository {
     /** 判断招标要求是否存在 */
     public boolean existsById(Long id) {
         return id != null && tenderRequirementsMapper.selectById(id) != null;
+    }
+
+    /**
+     * 查询已解析招标文件的列表项，按主键倒序（最近入库在前）。
+     *
+     * @param keyword 项目名称模糊匹配关键字，为空时不过滤
+     * @param limit   返回条数上限，调用方需保证已做合法区间校验
+     */
+    public List<TenderRequirementSummary> findSummaries(String keyword, int limit) {
+        LambdaQueryWrapper<TenderRequirements> wrapper = new LambdaQueryWrapper<TenderRequirements>()
+                .select(TenderRequirements::getId,
+                        TenderRequirements::getProjectName,
+                        TenderRequirements::getLocation,
+                        TenderRequirements::getDuration,
+                        TenderRequirements::getBudget);
+        if (StringUtils.hasText(keyword)) {
+            wrapper.like(TenderRequirements::getProjectName, keyword.trim());
+        }
+        wrapper.orderByDesc(TenderRequirements::getId).last("LIMIT " + limit);
+
+        List<TenderRequirements> rows = tenderRequirementsMapper.selectList(wrapper);
+        if (rows.isEmpty()) {
+            return List.of();
+        }
+
+        List<Long> ids = rows.stream().map(TenderRequirements::getId).toList();
+        Map<Long, Integer> qualificationCounts = countQualifications(ids);
+        Map<Long, Integer> performanceCounts = countPerformances(ids);
+        Map<Long, Integer> personnelCounts = countPersonnel(ids);
+        Map<Long, Integer> scoringItemCounts = countScoringItems(ids);
+
+        List<TenderRequirementSummary> summaries = new ArrayList<>(rows.size());
+        for (TenderRequirements row : rows) {
+            TenderRequirementSummary summary = new TenderRequirementSummary();
+            summary.setId(row.getId());
+            summary.setProjectName(row.getProjectName());
+            summary.setLocation(row.getLocation());
+            summary.setDuration(row.getDuration());
+            summary.setBudget(row.getBudget());
+            summary.setQualificationCount(qualificationCounts.getOrDefault(row.getId(), 0));
+            summary.setPerformanceCount(performanceCounts.getOrDefault(row.getId(), 0));
+            summary.setPersonnelCount(personnelCounts.getOrDefault(row.getId(), 0));
+            summary.setScoringItemCount(scoringItemCounts.getOrDefault(row.getId(), 0));
+            summaries.add(summary);
+        }
+        return summaries;
     }
 
     /** 按 id 删除，连同子表一并删除 */
@@ -144,6 +198,65 @@ public class TenderRequirementsRepository {
     private List<ScoringItem> findScoringItems(Long reqId) {
         return scoringItemMapper.selectList(new LambdaQueryWrapper<ScoringItem>()
                 .eq(ScoringItem::getTenderRequirementId, reqId));
+    }
+
+    // ---------- 列表页统计：按招标要求分组统计四张子表的条数，一次查询取回 ----------
+
+    private Map<Long, Integer> countQualifications(Collection<Long> ids) {
+        return countGrouped(qualificationRequirementMapper, new QueryWrapper<QualificationRequirement>()
+                .select("tender_requirement_id AS req_id", "COUNT(*) AS cnt")
+                .in("tender_requirement_id", ids)
+                .groupBy("tender_requirement_id"));
+    }
+
+    private Map<Long, Integer> countPerformances(Collection<Long> ids) {
+        return countGrouped(performanceRequirementMapper, new QueryWrapper<PerformanceRequirement>()
+                .select("tender_requirement_id AS req_id", "COUNT(*) AS cnt")
+                .in("tender_requirement_id", ids)
+                .groupBy("tender_requirement_id"));
+    }
+
+    private Map<Long, Integer> countPersonnel(Collection<Long> ids) {
+        return countGrouped(personnelRequirementMapper, new QueryWrapper<PersonnelRequirement>()
+                .select("tender_requirement_id AS req_id", "COUNT(*) AS cnt")
+                .in("tender_requirement_id", ids)
+                .groupBy("tender_requirement_id"));
+    }
+
+    private Map<Long, Integer> countScoringItems(Collection<Long> ids) {
+        return countGrouped(scoringItemMapper, new QueryWrapper<ScoringItem>()
+                .select("tender_requirement_id AS req_id", "COUNT(*) AS cnt")
+                .in("tender_requirement_id", ids)
+                .groupBy("tender_requirement_id"));
+    }
+
+    /** 执行分组统计查询，把 {req_id, cnt} 结果整理成 map；无数据时返回空 map */
+    private <T> Map<Long, Integer> countGrouped(BaseMapper<T> mapper, QueryWrapper<T> wrapper) {
+        List<Map<String, Object>> rows = mapper.selectMaps(wrapper);
+        if (CollectionUtils.isEmpty(rows)) {
+            return Map.of();
+        }
+        Map<Long, Integer> counts = new HashMap<>();
+        for (Map<String, Object> row : rows) {
+            Object reqId = lookupValue(row, "req_id", "tender_requirement_id");
+            Object count = lookupValue(row, "cnt", "count(*)");
+            if (reqId instanceof Number idNumber && count instanceof Number countNumber) {
+                counts.put(idNumber.longValue(), countNumber.intValue());
+            }
+        }
+        return counts;
+    }
+
+    /** 按忽略大小写的列名取值，规避不同驱动/数据库返回列名大小写差异 */
+    private static Object lookupValue(Map<String, Object> row, String... keys) {
+        for (Map.Entry<String, Object> entry : row.entrySet()) {
+            for (String key : keys) {
+                if (entry.getKey().equalsIgnoreCase(key)) {
+                    return entry.getValue();
+                }
+            }
+        }
+        return null;
     }
 
     // ---------- 长度归一化：与建库脚本列定义对齐，超长字段截断，避免写入时报错 ----------

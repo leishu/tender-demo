@@ -9,7 +9,7 @@ spring:
     virtual:
       enabled: true
   datasource:
-    url: jdbc:mysql://127.0.0.1:3306/tender_demo?useUnicode=true&characterEncoding=utf8
+    url: jdbc:mysql://127.0.0.1:3306/tender_demo?openTelemetry=DISABLED&useUnicode=true&characterEncoding=utf8
     username: tender
     password: tender123
     driver-class-name: com.mysql.cj.jdbc.Driver
@@ -25,6 +25,22 @@ agentscope:
   model: glm-5.2
   # 从环境变量 AGENTSCOPE_API_KEY 读取，禁止硬编码到代码或配置文件中
   api-key: ${AGENTSCOPE_API_KEY:}
+
+
+# Langfuse 链路追踪（https://cloud.langfuse.com）
+# 密钥从环境变量读取，禁止硬编码；enabled=false 时不会创建 OTel SDK
+langfuse:
+  enabled: ${LANGFUSE_ENABLED:true}
+  # EU 区 https://cloud.langfuse.com；US 区 https://us.cloud.langfuse.com；JP 区 https://jp.cloud.langfuse.com
+  host: ${LANGFUSE_HOST:https://cloud.langfuse.com}
+  public-key: ${LANGFUSE_PUBLIC_KEY:}
+  secret-key: ${LANGFUSE_SECRET_KEY:}
+  service-name: ${spring.application.name:tender-service}
+  environment: ${LANGFUSE_ENVIRONMENT:local}
+  # 全量采集为 1.0
+  sample-rate: ${LANGFUSE_SAMPLE_RATE:1.0}
+  # 是否上报提示词与模型回复；招标文件含敏感信息时可设为 false
+  capture-content: ${LANGFUSE_CAPTURE_CONTENT:true}
 
 
 # 知识库：向量检索 + 全文检索（Elasticsearch）

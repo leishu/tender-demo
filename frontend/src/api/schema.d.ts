@@ -60,6 +60,19 @@ type TenderRequirements = {
   entityType?: string
 }
 
+type TenderRequirementSummary = {
+  id?: number
+  projectName?: string
+  location?: string
+  duration?: string
+  budget?: string
+  qualificationCount?: number
+  performanceCount?: number
+  personnelCount?: number
+  scoringItemCount?: number
+  hasCatalog?: boolean
+}
+
 type CatalogGap = {
   type?: string
   detail?: string
@@ -86,6 +99,65 @@ type KnowledgeSearchHit = {
   content?: string
   createdAt?: number
   score?: number
+}
+
+type MatchStatus = 'MATCHED' | 'PARTIAL' | 'UNMATCHED'
+
+type PersonnelMatchCandidate = {
+  personnelId?: number
+  name?: string
+  gender?: string
+  yearsOfExperience?: number
+  roles?: string[]
+  matchedRoles?: string[]
+  matchedCertificates?: string[]
+  certificateValidUntil?: string
+  eligible?: boolean
+  reason?: string
+}
+
+type PersonnelMatchResult = {
+  entityType?: string
+  requirementId?: number
+  role?: string
+  requiredQuantity?: number
+  certificate?: string
+  source?: string
+  status?: MatchStatus
+  matchedCount?: number
+  candidates?: PersonnelMatchCandidate[]
+  reason?: string
+}
+
+type QualificationMatchCandidate = {
+  qualificationId?: number
+  type?: string
+  name?: string
+  level?: string
+  certNo?: string
+  validUntil?: string
+  expired?: boolean
+  eligible?: boolean
+  reason?: string
+}
+
+type QualificationMatchResult = {
+  entityType?: string
+  requirementId?: number
+  requiredType?: string
+  requiredLevel?: string
+  validRequirement?: string
+  source?: string
+  status?: MatchStatus
+  matchedCount?: number
+  candidates?: QualificationMatchCandidate[]
+  reason?: string
+}
+
+type MatchEvent = {
+  module?: 'personnel' | 'qualification' | 'error' | 'completed'
+  data?: PersonnelMatchResult | QualificationMatchResult
+  message?: string
 }
 
 export interface paths {
@@ -116,6 +188,23 @@ export interface paths {
         200: {
           content: {
             'application/json': number
+          }
+        }
+      }
+    }
+  }
+  '/tender/requirements': {
+    get: {
+      parameters: {
+        query?: {
+          keyword?: string
+          limit?: number
+        }
+      }
+      responses: {
+        200: {
+          content: {
+            'application/json': components['schemas']['TenderRequirementSummary'][]
           }
         }
       }
@@ -178,6 +267,22 @@ export interface paths {
         200: {
           content: {
             'application/json': number
+          }
+        }
+      }
+    }
+  }
+  '/tender/match': {
+    post: {
+      requestBody: {
+        content: {
+          'application/json': components['schemas']['MatchRequest']
+        }
+      }
+      responses: {
+        200: {
+          content: {
+            'text/event-stream': components['schemas']['MatchEvent']
           }
         }
       }
@@ -252,6 +357,7 @@ export interface components {
       message?: string
     }
     TenderRequirements: TenderRequirements
+    TenderRequirementSummary: TenderRequirementSummary
     QualificationRequirement: QualificationRequirement
     PerformanceRequirement: PerformanceRequirement
     PersonnelRequirement: PersonnelRequirement
@@ -281,6 +387,16 @@ export interface components {
       scoringPointIds?: string
     }
     KnowledgeSearchHit: KnowledgeSearchHit
+    MatchRequest: {
+      userId?: string
+      tenderRequirementId?: number
+    }
+    MatchStatus: MatchStatus
+    PersonnelMatchCandidate: PersonnelMatchCandidate
+    PersonnelMatchResult: PersonnelMatchResult
+    QualificationMatchCandidate: QualificationMatchCandidate
+    QualificationMatchResult: QualificationMatchResult
+    MatchEvent: MatchEvent
   }
 }
 

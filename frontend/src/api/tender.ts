@@ -6,6 +6,7 @@ import type {
   CatalogSaveRequest,
   ChapterRequest,
   TenderRequirements,
+  TenderRequirementSummary,
 } from './types'
 import { withTimeout } from '@/utils/async'
 
@@ -13,6 +14,18 @@ const SHORT_TIMEOUT = 30_000
 const LONG_TIMEOUT = 180_000
 
 export const tenderApi = {
+  /** 查询已解析（已入库）的招标文件列表，按最近入库倒序 */
+  async listRequirements(
+    params: { keyword?: string; limit?: number } = {},
+    signal?: AbortSignal,
+  ): Promise<TenderRequirementSummary[]> {
+    const result = await client.GET('/tender/requirements', {
+      params: { query: params },
+      signal: withTimeout(signal, SHORT_TIMEOUT),
+    })
+    return unwrap<TenderRequirementSummary[]>(result)
+  },
+
   async confirm(body: TenderRequirements, signal?: AbortSignal): Promise<number> {
     const result = await client.POST('/tender/parse/confirm', {
       body,

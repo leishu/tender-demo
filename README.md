@@ -13,11 +13,14 @@
 | MySQL | 结构化数据存储 |
 | Elasticsearch | 9.3.3（BM25 + kNN + RRF 混合检索） |
 | Springdoc OpenAPI | 3.1.1（在线接口文档） |
+| Langfuse | OTLP/HTTP 链路追踪（可选，`cloud.langfuse.com`） |
 
 ## 主要能力
 
 - **招标文件解析**：`POST /tender/parse`，以 SSE 实时推送 project / qualification / performance / personnel / scoringItem 等结构化事件。
 - **解析结果入库**：`POST /tender/parse/confirm`，主表 + 资质/业绩/人员/评分点四张子表持久化。
+- **已解析文件列表**：`GET /tender/requirements`，返回已入库招标要求的项目概况、各类要求条数与是否已生成目录，
+  支持按项目名称模糊搜索（`keyword`）与条数上限（`limit`，默认 50、最大 200）。
 - **投标目录生成**：`POST /tender/catalog`，输出最多三级的目录 JSON，支持商务/技术分列。
 - **章节撰写**：`POST /tender/chapter`，结合评分点生成章节正文。
 - **人员与企业资质匹配**：`POST /tender/match`，并发调度 `personnel-matcher` 与 `qualification-matcher`
@@ -116,6 +119,56 @@ curl -N -X POST http://localhost:8080/tender/match \
   -H "Accept: text/event-stream" \
   -d '{"userId":"u1","tenderRequirementId":1234567890}'
 ```
+
+## Langfuse 链路追踪
+
+项目通过 OpenTelemetry（OTLP/HTTP）把 Agent 执行链路上报到
+[cloud.langfuse.com](https://cloud.langfuse.com)。默认关闭；关闭时不会创建
+OpenTelemetry SDK，也不会引入 Reactor 全局 Hook。
+
+### 启用方式
+
+1. 在 Langfuse 控制台创建项目，拿到 `pk-lf-...` 与 `sk-lf-...`。
+2. 启动服务前设置环境变量：
+
+   ```bash
+   export LANGFUSE_ENABLED=true
+   export LANGFUSE_PUBLIC_KEY=pk-lf-xxxxxxxx
+   export LANGFUSE_SECRET_KEY=sk-lf-xxxxxxxx
+
+   # 可选
+   export LANGFUSE_HOST=https://cloud.langfuse.com   # US: https://us.cloud.langfuse.com；JP: https://jp.cloud.langfuse.com
+   export LANGFUSE_ENVIRONMENT=dev                   # 写入 deployment.environment.name
+   export LANGFUSE_SAMPLE_RATE=1.0                   # 1.0 = 全量采集
+   export LANGFUSE_CAPTURE_CONTENT=true              # 是否上报提示词和模型回复
+   ```
+
+3. 正常启动服务并调用任意 `/tender/*` 接口，打开 Langfuse 项目即可看到 trace。
+
+`application.yml` 中对应的配置项：
+
+| 配置 | 环境变量 | 默认值 | 说明 |
+|---|---|---|---|
+| `langfuse.enabled` | `LANGFUSE_ENABLED` | `false` | 是否启用上报 |
+| `langfuse.host` | `LANGFUSE_HOST` | `https://cloud.langfuse.com` | Langfuse 服务地址，实际 OTLP 路径为 `/api/public/otel/v1/traces` |
+| `langfuse.public-key` | `LANGFUSE_PUBLIC_KEY` | 空 | 项目公钥，启用时必填 |
+| `langfuse.secret-key` | `LANGFUSE_SECRET_KEY` | 空 | 项目私钥，启用时必填 |
+| `langfuse.service-name` | - | `tender-service` | 写入 `service.name` |
+| `langfuse.environment` | `LANGFUSE_ENVIRONMENT` | `local` | 写入 `deployment.environment.name` |
+| `langfuse.sample-rate` | `LANGFUSE_SAMPLE_RATE` | `1.0` | 采样率，范围 0~1 |
+| `langfuse.capture-content` | `LANGFUSE_CAPTURE_CONTENT` | `true` | 是否上报提示词、模型回复与工具输入输出 |
+
+### 上报内容
+
+| Langfuse 视图 | 对应 AgentScope 事件 |
+|---|---|
+| `invoke_agent TenderAssistant` | 一次 Agent 调用，子 Agent 调用会作为子 span |
+| `chat <model>` | 每次模型调用，含模型名、token 用量、提示词与回复（开启 `capture-content` 时） |
+| `execute_tool <tool>` | 每次工具调用，含工具入参与返回文本（开启 `capture-content` 时） |
+| User / Session | 来自请求的 `userId` 与 `RuntimeContext.sessionId` |
+
+> 招标文件可能包含敏感信息。生产环境如果不希望把正文上传到 Langfuse，设置
+> `LANGFUSE_CAPTURE_CONTENT=false`，此时仍会上报调用链、耗时、token 用量等元数据。
 
 ## 前端工作台
 

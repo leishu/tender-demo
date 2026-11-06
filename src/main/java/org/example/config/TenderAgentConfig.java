@@ -3,14 +3,19 @@ package org.example.config;
 import io.agentscope.core.state.AgentStateStore;
 import io.agentscope.core.state.InMemoryAgentStateStore;
 import io.agentscope.core.tool.Toolkit;
+import io.agentscope.core.tracing.OtelTracingMiddleware;
 import io.agentscope.extensions.model.dashscope.DashScopeChatModel;
 import io.agentscope.harness.agent.HarnessAgent;
+import io.opentelemetry.sdk.OpenTelemetrySdk;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.example.enterprise.tool.EnterpriseDataTools;
+import org.example.middleware.LangfuseSpanEnrichmentMiddleware;
 import org.example.middleware.ModelCallAuditMiddleware;
 import org.example.parsing.tool.TenderTools;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Scope;
@@ -19,6 +24,7 @@ import org.springframework.context.annotation.Scope;
 @Configuration
 @RequiredArgsConstructor
 @Slf4j
+@EnableConfigurationProperties(LangfuseProperties.class)
 public class TenderAgentConfig {
 
     @Value("${agentscope.workspace-path}")
@@ -29,6 +35,12 @@ public class TenderAgentConfig {
 
     @Value("${agentscope.api-key}")
     private String apiKey;
+
+    /** Langfuse 启用时才会存在 OTel SDK Bean */
+    private final ObjectProvider<OpenTelemetrySdk> openTelemetrySdkProvider;
+
+    /** Langfuse 启用时才会存在的内容补全中间件 */
+    private final ObjectProvider<LangfuseSpanEnrichmentMiddleware> langfuseMiddlewareProvider;
 
     @Bean
     public AgentStateStore agentStateStore() {
@@ -71,6 +83,17 @@ public class TenderAgentConfig {
                 .disableWebTools()
                 //.disableFilesystemTools()
         ;
+
+        // 配置了 Langfuse 时才注册 OTel 追踪，避免未启用时引入 Reactor 全局 Hook
+        if (openTelemetrySdkProvider.getIfAvailable() != null) {
+            builder.middleware(new OtelTracingMiddleware());
+            LangfuseSpanEnrichmentMiddleware langfuseMiddleware =
+                    langfuseMiddlewareProvider.getIfAvailable();
+            if (langfuseMiddleware != null) {
+                builder.middleware(langfuseMiddleware);
+            }
+        }
+
         return builder;
     }
 }

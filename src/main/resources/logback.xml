@@ -74,7 +74,11 @@
     <logger name="com.baomidou.mybatisplus" level="INFO"/>
 
     <!-- MyBatis mapper 关闭 DEBUG，避免打印 SQL 语句 -->
-    <logger name="org.example.mapper" level="INFO"/>
+    <logger name="org.example.catalog.mapper" level="INFO"/>
+    <logger name="org.example.enterprise.mapper" level="INFO"/>
+    <logger name="org.example.knowledge.mapper" level="INFO"/>
+    <logger name="org.example.matching.mapper" level="INFO"/>
+    <logger name="org.example.parsing.mapper" level="INFO"/>
 
     <!-- 项目自己的包按根级别输出 -->
     <logger name="org.example" level="${LOG_LEVEL_APP:-DEBUG}"/>
