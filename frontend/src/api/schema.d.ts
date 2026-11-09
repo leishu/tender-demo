@@ -151,6 +151,8 @@ type QualificationMatchResult = {
   source?: string
   status?: MatchStatus
   matchedCount?: number
+  requiresManualReview?: boolean
+  risk?: string
   candidates?: QualificationMatchCandidate[]
   reason?: string
 }

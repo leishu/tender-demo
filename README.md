@@ -25,6 +25,7 @@
 - **章节撰写**：`POST /tender/chapter`，结合评分点生成章节正文。
 - **人员与企业资质匹配**：`POST /tender/match`，并发调度 `personnel-matcher` 与 `qualification-matcher`
   两个子 Agent，匹配完一条就通过 SSE 推送一条，全部结束后推送 `completed`。
+  首轮缺少结果时只针对缺失的 `requirementId` 自动补跑，次数由 `MATCHING_MAX_RETRIES` 控制（默认 1，0 表示关闭）。
 - **知识库**：`POST /knowledge/{knowledgeBaseName}` 批量写入并向量化，`GET /knowledge/search` 混合检索。
 - **Agent 编排**：主 Agent 调度 `tender-parser`、`catalog-builder`、`chapter-writer`、
   `personnel-matcher`、`qualification-matcher` 子 Agent，规则见工作区 `AGENTS.md`。

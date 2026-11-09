@@ -2,6 +2,8 @@ package org.example.matching.service;
 
 import io.agentscope.core.event.AgentEvent;
 import io.agentscope.core.event.TextBlockDeltaEvent;
+import org.example.matching.model.MatchStatus;
+import org.example.matching.model.QualificationMatchResult;
 import org.example.matching.model.dto.MatchEvent;
 import org.example.matching.model.dto.MatchModule;
 import org.example.util.JsonStreamExtractor;
@@ -11,7 +13,10 @@ import org.springframework.stereotype.Component;
 import reactor.core.publisher.Flux;
 
 import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 
 import tools.jackson.databind.DeserializationFeature;
 import tools.jackson.databind.JsonNode;
@@ -20,9 +25,10 @@ import tools.jackson.databind.json.JsonMapper;
 /**
  * 将匹配子 Agent 的事件流转换为结构化 SSE 事件流（{@link MatchEvent}）。
  *
- * <p>子 Agent 被要求每匹配完一条要求就输出一个平级 JSON 对象。这里累积
+ * <p>子 Agent 被要求一次性输出多个平级 JSON 对象（每行一个）。这里累积
  * {@link TextBlockDeltaEvent} 的增量文本，凑齐一个完整 JSON 对象就立即反序列化并推送，
- * 因此前端能在子 Agent 仍在生成后续结果时就看到已完成的匹配项。</p>
+ * 因此前端能在后续对象仍在生成时就看到已完成的匹配项。流结束后还会校验
+ * requirementId 是否齐全，缺失时追加 error 事件，避免静默漏条。</p>
  *
  * <p>两个子 Agent 各自持有一个转换器实例的缓冲区，互不干扰；调用方用
  * {@link Flux#merge(Iterable)} 把两路事件合并后，即可得到并发、逐条到达的 SSE 流。</p>
@@ -52,25 +58,59 @@ public class MatchEventTransformer {
      * @param type   匹配结果类型
      */
     public <T> Flux<MatchEvent<?>> toSse(Flux<AgentEvent> events, MatchModule module, Class<T> type) {
+        return Flux.defer(() -> toSseTracked(events, module, type, new HashSet<>()));
+    }
+
+    /**
+     * 把单路子 Agent 事件流转换为匹配事件流，并在流结束后校验结果完整性。
+     *
+     * <p>用于不需要自动重试的场景：缺条时直接追加 error 事件。</p>
+     *
+     * @param expectedRequirementIds 本次应返回的 requirementId 集合；为空表示不校验
+     */
+    public <T> Flux<MatchEvent<?>> toSse(Flux<AgentEvent> events,
+                                         MatchModule module,
+                                         Class<T> type,
+                                         Set<Long> expectedRequirementIds) {
+        return Flux.defer(() -> {
+            Set<Long> seen = new HashSet<>();
+            return toSseTracked(events, module, type, seen)
+                    .concatWith(Flux.defer(() -> missingResultsEvent(module, seen, expectedRequirementIds)));
+        });
+    }
+
+    /**
+     * 把单路子 Agent 事件流转换为匹配事件流，并把已返回的 requirementId 记录到
+     * {@code seen}，供上层编排决定是否需要补跑缺失项。
+     *
+     * <p>流异常时只记录日志并结束本路，不立即向前端推送 error 事件；上层重试后
+     * 仍缺条时再统一报错，避免“重试成功但界面仍显示失败”。</p>
+     */
+    public <T> Flux<MatchEvent<?>> toSseTracked(Flux<AgentEvent> events,
+                                                MatchModule module,
+                                                Class<T> type,
+                                                Set<Long> seen) {
         return Flux.defer(() -> {
             final StringBuilder buffer = new StringBuilder();
             return events
                     .concatMap(event -> {
                         if (event instanceof TextBlockDeltaEvent delta) {
                             buffer.append(delta.getDelta());
-                            return extract(buffer, module, type);
+                            return extract(buffer, module, type, seen);
                         }
                         return Flux.empty();
                     })
                     .onErrorResume(error -> {
-                        log.error("{} 匹配子 Agent 流式处理失败", module.getCode(), error);
-                        return Flux.just(MatchEvent.error(
-                                moduleLabel(module) + "匹配失败：" + error.getMessage()));
+                        log.error("{} 匹配子 Agent 流式处理失败，交由上层重试", module.getCode(), error);
+                        return Flux.empty();
                     });
         });
     }
 
-    private <T> Flux<MatchEvent<?>> extract(StringBuilder buffer, MatchModule module, Class<T> type) {
+    private <T> Flux<MatchEvent<?>> extract(StringBuilder buffer,
+                                            MatchModule module,
+                                            Class<T> type,
+                                            Set<Long> seen) {
         List<MatchEvent<?>> results = new ArrayList<>();
         String json;
         while ((json = JsonStreamExtractor.takeFirstCompleteJson(buffer)) != null) {
@@ -80,6 +120,8 @@ public class MatchEventTransformer {
                     continue;
                 }
                 T data = mapper.convertValue(node, type);
+                enforceMandatoryManualReview(data);
+                trackRequirementId(node, module, seen);
                 log.info("匹配子 Agent 输出 {} 结果，发送到客户端: {}", module.getCode(), data);
                 results.add(new MatchEvent<>(module, data));
             } catch (Exception e) {
@@ -87,6 +129,70 @@ public class MatchEventTransformer {
             }
         }
         return Flux.fromIterable(results);
+    }
+
+    /**
+     * 应用层兜底：强制资格 UNMATCHED 时强制打上人工复核标记。
+     *
+     * <p>不能只依赖提示词让模型输出该字段；漏写时会导致 UI 无法对废标风险告警。</p>
+     */
+    private void enforceMandatoryManualReview(Object data) {
+        if (!(data instanceof QualificationMatchResult result)) {
+            return;
+        }
+        if (result.getStatus() != MatchStatus.UNMATCHED) {
+            return;
+        }
+        if (!isMandatoryQualification(result.getRequiredType())) {
+            return;
+        }
+        result.setRequiresManualReview(true);
+        result.setRisk("mandatory_qualification_missing");
+    }
+
+    private boolean isMandatoryQualification(String requiredType) {
+        if (requiredType == null || requiredType.isBlank()) {
+            return false;
+        }
+        String type = requiredType.trim();
+        return type.contains("施工总承包")
+                || type.contains("安全生产许可证")
+                || type.toUpperCase().contains("ISO9001")
+                || type.toUpperCase().contains("ISO14001")
+                || type.toUpperCase().contains("ISO45001");
+    }
+
+    private void trackRequirementId(JsonNode node, MatchModule module, Set<Long> seen) {
+        if (!node.hasNonNull("requirementId")) {
+            log.warn("{} 匹配结果缺少 requirementId，无法做完整性校验: {}", module.getCode(), node);
+            return;
+        }
+        long requirementId = node.get("requirementId").asLong();
+        if (!seen.add(requirementId)) {
+            log.warn("{} 匹配结果出现重复 requirementId: {}", module.getCode(), requirementId);
+        }
+    }
+
+    /**
+     * 对比期望与实际返回的 requirementId，缺少结果时生成 error 事件。
+     *
+     * <p>自动重试全部结束后仍缺条时，由编排层调用本方法把缺口暴露给前端，
+     * 避免界面显示“已完成”却少一条结果。</p>
+     */
+    public Flux<MatchEvent<?>> missingResultsEvent(MatchModule module,
+                                                   Set<Long> seen,
+                                                   Set<Long> expected) {
+        if (expected.isEmpty()) {
+            return Flux.empty();
+        }
+        Set<Long> missing = new LinkedHashSet<>(expected);
+        missing.removeAll(seen);
+        if (missing.isEmpty()) {
+            return Flux.empty();
+        }
+        log.error("{} 匹配结果不完整，缺少 requirementId: {}", module.getCode(), missing);
+        return Flux.just(MatchEvent.error(
+                moduleLabel(module) + "匹配缺少 " + missing.size() + " 条结果，requirementId=" + missing));
     }
 
     /**

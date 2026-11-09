@@ -22,7 +22,8 @@ public class EnterpriseDataTools {
     @Tool(name = "query_qualifications",
             description = "查询企业资质列表。当需要确认企业是否具备某项资质时调用。")
     public List<Qualification> queryQualifications(
-            @ToolParam(name = "type", description = "资质类型，如'ISO9001'。不传则返回全部")
+            @ToolParam(name = "type", required = false,
+                    description = "资质类型，如'ISO9001'。传空字符串或省略该参数均返回全部资质")
             String type) {
         return repository.findQualifications(type);
     }
@@ -30,7 +31,8 @@ public class EnterpriseDataTools {
     @Tool(name = "query_performances",
             description = "查询企业类似项目业绩。当需要引用过往案例时调用。")
     public List<ProjectPerformance> queryPerformances(
-            @ToolParam(name = "keyword", description = "项目关键词")
+            @ToolParam(name = "keyword", required = false,
+                    description = "项目关键词。传空字符串或省略该参数均返回全部业绩")
             String keyword) {
         return repository.findPerformances(keyword);
     }
@@ -41,7 +43,8 @@ public class EnterpriseDataTools {
                     + "职称也是其中一条，type 为「职称」，major 为专业）。"
                     + "当需要确认项目团队配置、核对职称或证书要求时调用。")
     public List<Personnel> queryPersonnel(
-            @ToolParam(name = "role", description = "岗位关键词，如'项目经理'。按关键词模糊匹配，不传则返回全部人员")
+            @ToolParam(name = "role", required = false,
+                    description = "岗位关键词，如'项目经理'。按关键词模糊匹配；传空字符串或省略该参数均返回全部人员")
             String role) {
         return repository.findPersonnel(role);
     }

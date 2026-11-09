@@ -36,6 +36,12 @@ public class QualificationMatchResult {
     @Schema(description = "满足条件的候选资质数量")
     private Integer matchedCount;
 
+    @Schema(description = "是否需要人工复核；强制资格 UNMATCHED 时为 true")
+    private Boolean requiresManualReview;
+
+    @Schema(description = "风险标识，如 mandatory_qualification_missing")
+    private String risk;
+
     @Schema(description = "候选资质列表")
     private List<QualificationMatchCandidate> candidates;
 

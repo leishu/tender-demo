@@ -71,6 +71,16 @@ const progressText = computed(() => {
 const personnelSummary = computed(() => summarize(personnelResults.value))
 const qualificationSummary = computed(() => summarize(qualificationResults.value))
 
+const manualReviewItems = computed(() =>
+  qualificationResults.value.filter((item) => item.requiresManualReview),
+)
+
+const manualReviewListText = computed(() =>
+  manualReviewItems.value
+    .map((item) => item.requiredType || `要求 #${item.requirementId ?? '未知'}`)
+    .join('、'),
+)
+
 const personnelFiltered = computed(() =>
   onlyUnmet.value
     ? personnelResults.value.filter((item) => item.status !== 'MATCHED')
@@ -280,6 +290,19 @@ async function runMatch() {
           </div>
         </template>
 
+        <el-alert
+          v-if="manualReviewItems.length"
+          type="error"
+          show-icon
+          :closable="false"
+          class="mb"
+          :title="`有 ${manualReviewItems.length} 项资质要求需人工复核，可能影响投标资格`"
+        >
+          <template #default>
+            <span>请优先核对：{{ manualReviewListText }}</span>
+          </template>
+        </el-alert>
+
         <el-tabs v-model="activeTab">
           <el-tab-pane :label="`人员匹配 (${personnelResults.length})`" name="personnel">
             <el-empty
@@ -392,6 +415,14 @@ async function runMatch() {
                     <el-tag :type="matchStatusMeta(item.status).type" size="small" effect="dark">
                       {{ matchStatusMeta(item.status).label }}
                     </el-tag>
+                    <el-tag
+                      v-if="item.requiresManualReview"
+                      type="danger"
+                      size="small"
+                      effect="dark"
+                    >
+                      需人工复核
+                    </el-tag>
                     <strong>{{ item.requiredType || '未命名资质' }}</strong>
                     <span class="muted">等级：{{ item.requiredLevel || '不限' }}</span>
                     <span class="muted">候选 {{ item.matchedCount ?? 0 }} 项</span>
@@ -403,6 +434,7 @@ async function runMatch() {
 
                 <div class="match-meta">
                   <span>有效期要求：{{ item.validRequirement || '无特别要求' }}</span>
+                  <span v-if="item.risk" class="muted">风险标识：{{ item.risk }}</span>
                 </div>
 
                 <el-alert

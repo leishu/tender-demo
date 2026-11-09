@@ -3,6 +3,7 @@ package org.example.enterprise.model;
 import com.baomidou.mybatisplus.annotation.IdType;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
+import com.fasterxml.jackson.annotation.JsonFormat;
 import io.swagger.v3.oas.annotations.media.Schema;
 import lombok.Data;
 
@@ -36,7 +37,8 @@ public class PersonnelCertificate {
     @Schema(description = "证书编号", example = "2023011234")
     private String certNo;
 
-    /** 有效期至，长期有效留空（职称通常留空） */
+    /** 有效期至，长期有效留空（职称通常留空）；统一以 ISO 字符串返回给模型 */
+    @JsonFormat(shape = JsonFormat.Shape.STRING, pattern = "yyyy-MM-dd")
     @Schema(description = "有效期至，长期有效留空（职称通常留空）", example = "2028-12-31")
     private LocalDate validUntil;
 }

@@ -27,6 +27,12 @@ agentscope:
   api-key: ${AGENTSCOPE_API_KEY:}
 
 
+# 人员/企业资质匹配
+matching:
+  # 首轮缺少结果或流失败时，只对缺失的 requirementId 自动补跑的最大次数；0 表示关闭
+  max-retries: ${MATCHING_MAX_RETRIES:1}
+
+
 # Langfuse 链路追踪（https://cloud.langfuse.com）
 # 密钥从环境变量读取，禁止硬编码；enabled=false 时不会创建 OTel SDK
 langfuse:

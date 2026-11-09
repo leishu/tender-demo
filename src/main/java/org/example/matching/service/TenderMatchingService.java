@@ -14,6 +14,8 @@ import org.example.matching.model.dto.MatchEvent;
 import org.example.matching.model.dto.MatchModule;
 import org.example.matching.model.req.MatchRequest;
 import org.example.matching.prompt.MatchPromptProvider;
+import org.example.parsing.model.PersonnelRequirement;
+import org.example.parsing.model.QualificationRequirement;
 import org.example.parsing.model.TenderRequirements;
 import org.example.parsing.repo.TenderRequirementsRepository;
 import org.example.service.RuntimeContextBuilder;
@@ -29,8 +31,13 @@ import reactor.core.scheduler.Schedulers;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
 /**
  * 人员匹配与企业资质匹配的编排服务。
@@ -61,6 +68,10 @@ public class TenderMatchingService {
 
     @Value("${agentscope.workspace-path}")
     private String workspacePath;
+
+    /** 首轮缺失结果时的最大自动重试次数，默认 1 次；设为 0 可关闭重试 */
+    @Value("${matching.max-retries:1}")
+    private int maxRetries;
 
     public TenderMatchingService(ObjectProvider<HarnessAgent.Builder> builderProvider,
                                  RuntimeContextBuilder contextBuilder,
@@ -150,14 +161,16 @@ public class TenderMatchingService {
 
         List<Flux<MatchEvent<?>>> streams = new ArrayList<>();
         if (!CollectionUtils.isEmpty(requirements.getPersonnel())) {
-            streams.add(runSubagent(manager, PERSONNEL_AGENT,
-                    promptProvider.renderPersonnel(requirements, requirements.getPersonnel()),
-                    ctx, MatchModule.PERSONNEL, PersonnelMatchResult.class));
+            streams.add(runSubagentWithRetry(manager, PERSONNEL_AGENT, ctx,
+                    MatchModule.PERSONNEL, PersonnelMatchResult.class,
+                    requirements.getPersonnel(), PersonnelRequirement::getId,
+                    items -> promptProvider.renderPersonnel(requirements, items)));
         }
         if (!CollectionUtils.isEmpty(requirements.getQualifications())) {
-            streams.add(runSubagent(manager, QUALIFICATION_AGENT,
-                    promptProvider.renderQualification(requirements, requirements.getQualifications()),
-                    ctx, MatchModule.QUALIFICATION, QualificationMatchResult.class));
+            streams.add(runSubagentWithRetry(manager, QUALIFICATION_AGENT, ctx,
+                    MatchModule.QUALIFICATION, QualificationMatchResult.class,
+                    requirements.getQualifications(), QualificationRequirement::getId,
+                    items -> promptProvider.renderQualification(requirements, items)));
         }
 
         log.info("开始并发匹配：人员 {} 条，企业资质 {} 条",
@@ -172,39 +185,98 @@ public class TenderMatchingService {
     }
 
     /**
-     * 创建并订阅一个匹配子 Agent。
+     * 创建并订阅一个匹配子 Agent，首轮缺条时只针对缺失的 requirementId 自动补跑。
+     *
+     * <p>每次尝试使用独立的 sessionId，避免重试复用上一轮对话导致模型重复输出。
+     * 重试结束后仍缺条时，追加 error 事件把缺口暴露给前端。</p>
+     */
+    private <R, T> Flux<MatchEvent<?>> runSubagentWithRetry(DefaultAgentManager manager,
+                                                            String agentId,
+                                                            RuntimeContext parentCtx,
+                                                            MatchModule module,
+                                                            Class<T> type,
+                                                            List<R> allItems,
+                                                            Function<R, Long> idOf,
+                                                            Function<List<R>, String> promptRenderer) {
+        Set<Long> expected = allItems.stream()
+                .map(idOf)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+        Set<Long> seen = ConcurrentHashMap.newKeySet();
+
+        List<Flux<MatchEvent<?>>> attempts = new ArrayList<>();
+        attempts.add(Flux.defer(() -> attempt(manager, agentId,
+                promptRenderer.apply(allItems), parentCtx, module, type, seen, 0)));
+
+        for (int i = 1; i <= Math.max(0, maxRetries); i++) {
+            final int attemptNo = i;
+            attempts.add(Flux.defer(() -> {
+                Set<Long> missing = missingIds(expected, seen);
+                if (missing.isEmpty()) {
+                    return Flux.empty();
+                }
+                List<R> retryItems = allItems.stream()
+                        .filter(item -> missing.contains(idOf.apply(item)))
+                        .toList();
+                if (retryItems.isEmpty()) {
+                    return Flux.empty();
+                }
+                log.warn("{} 首轮缺少 {} 条结果，开始第 {} 次重试：requirementId={}",
+                        module.getCode(), missing.size(), attemptNo, missing);
+                return attempt(manager, agentId, promptRenderer.apply(retryItems),
+                        parentCtx, module, type, seen, attemptNo);
+            }));
+        }
+
+        return Flux.concat(attempts)
+                .concatWith(Flux.defer(() ->
+                        eventTransformer.missingResultsEvent(module, seen, expected)));
+    }
+
+    /**
+     * 创建并订阅一次匹配子 Agent。
      *
      * <p>子 Agent 的名称来自工作区声明；每个子 Agent 使用独立 sessionId，避免两个
      * 并发调用在共享的 {@code AgentStateStore} 中互相覆盖。</p>
      */
-    private <T> Flux<MatchEvent<?>> runSubagent(DefaultAgentManager manager,
-                                                String agentId,
-                                                String prompt,
-                                                RuntimeContext parentCtx,
-                                                MatchModule module,
-                                                Class<T> type) {
+    private <T> Flux<MatchEvent<?>> attempt(DefaultAgentManager manager,
+                                            String agentId,
+                                            String prompt,
+                                            RuntimeContext parentCtx,
+                                            MatchModule module,
+                                            Class<T> type,
+                                            Set<Long> seen,
+                                            int attemptNo) {
         Agent agent;
         try {
             agent = manager.createAgent(agentId, parentCtx);
         } catch (Exception e) {
-            log.error("创建 {} 子 Agent 失败", agentId, e);
-            return Flux.just(MatchEvent.error(
-                    "创建 " + agentId + " 子 Agent 失败：" + e.getMessage()));
+            log.error("创建 {} 子 Agent 失败（attempt {}）", agentId, attemptNo, e);
+            return Flux.empty();
         }
         if (!(agent instanceof HarnessAgent harness)) {
-            return Flux.just(MatchEvent.error(agentId + " 不是可流式调用的 HarnessAgent"));
+            log.error("{} 不是可流式调用的 HarnessAgent（attempt {}）", agentId, attemptNo);
+            return Flux.empty();
         }
 
         RuntimeContext childCtx = RuntimeContext.builder(parentCtx)
-                .sessionId(parentCtx.getSessionId() + "-" + module.getCode())
+                .sessionId(parentCtx.getSessionId() + "-" + module.getCode()
+                        + (attemptNo == 0 ? "" : "-retry" + attemptNo))
                 .build();
 
         return Flux.using(
                 () -> harness,
-                child -> eventTransformer.toSse(
-                        child.streamEvents(new UserMessage(prompt), childCtx), module, type),
+                child -> eventTransformer.toSseTracked(
+                        child.streamEvents(new UserMessage(prompt), childCtx), module, type, seen),
                 this::closeQuietly
         );
+    }
+
+    /** 计算本轮仍缺失的 requirementId，保持输入顺序，便于日志与重试提示可读 */
+    static Set<Long> missingIds(Set<Long> expected, Set<Long> seen) {
+        Set<Long> missing = new LinkedHashSet<>(expected);
+        missing.removeAll(seen);
+        return missing;
     }
 
     private void closeQuietly(HarnessAgent agent) {
