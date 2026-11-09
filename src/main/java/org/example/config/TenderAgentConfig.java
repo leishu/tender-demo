@@ -96,6 +96,8 @@ public class TenderAgentConfig {
                 //.enableAgentTracingLog(false)
                 //.disableShellTool()
                 .disableWebTools()
+                .disableMemoryTools()
+                .disableMemoryHooks()
                 //.disableFilesystemTools()
         ;
 
