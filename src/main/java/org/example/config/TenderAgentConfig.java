@@ -1,5 +1,6 @@
 package org.example.config;
 
+import io.agentscope.core.model.GenerateOptions;
 import io.agentscope.core.state.AgentStateStore;
 import io.agentscope.core.state.InMemoryAgentStateStore;
 import io.agentscope.core.tool.Toolkit;
@@ -36,6 +37,14 @@ public class TenderAgentConfig {
     @Value("${agentscope.api-key}")
     private String apiKey;
 
+    /**
+     * 可选的思考 token 上限。人员匹配曾出现 2.2 万 reasoning token 只产出 57 个
+     * output token、单轮推理 140s 的情况；配置后可截断过长的思考。
+     * 留空表示不限制（保持模型默认行为）。
+     */
+    @Value("${agentscope.thinking-budget:#{null}}")
+    private Integer thinkingBudget;
+
     /** Langfuse 启用时才会存在 OTel SDK Bean */
     private final ObjectProvider<OpenTelemetrySdk> openTelemetrySdkProvider;
 
@@ -67,13 +76,19 @@ public class TenderAgentConfig {
         toolkit.registerTool(tenderTools);
         toolkit.registerTool(enterpriseDataTools);
 
+        DashScopeChatModel.Builder modelBuilder = DashScopeChatModel.builder()
+                .apiKey(apiKey)
+                .modelName(model);
+        if (thinkingBudget != null && thinkingBudget > 0) {
+            modelBuilder.defaultOptions(GenerateOptions.builder()
+                    .thinkingBudget(thinkingBudget)
+                    .build());
+        }
+
         HarnessAgent.Builder builder = HarnessAgent.builder()
                 .name("TenderAssistant")
                 .sysPrompt("你是一个投标服务助手。请严格遵循工作区中的行为约定和调度规则。")
-                .model(DashScopeChatModel.builder()
-                        .apiKey(apiKey)
-                        .modelName(model)
-                        .build())
+                .model(modelBuilder.build())
                 .toolkit(toolkit)
                 .stateStore(stateStore)
                 .workspace(workspacePath)

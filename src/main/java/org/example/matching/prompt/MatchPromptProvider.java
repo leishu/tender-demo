@@ -42,15 +42,22 @@ public class MatchPromptProvider {
                 %s
 
                 ## 执行要求
-                1. 必须调用 `query_personnel` 查询企业人员。先用一次空 role 查询全部人员并复用结果，
-                   不得凭记忆编造人员、岗位、证书或年限。
+                1. 必须调用 `query_personnel` 查询企业人员。按输入中出现的每个岗位各查询一次
+                   （role 传岗位名，可并行发起），相同岗位复用结果，不要重复查询，也不要空 role 全量查询；
+                   常见岗位别名会自动展开。查不到时改用更短的关键词重试，不得凭记忆编造人员、岗位、证书或年限。
                 2. 按输入顺序逐条匹配；全部匹配完成后，一次性按顺序输出全部 `personnelMatch` JSON 对象。
                    每个对象单独一行，对象之间只允许换行，不要输出“要求 1/要求 2”式小标题。
                 3. 输入中的每一条要求都必须有且仅有一个结果对象；没有合适人员时也要输出
                    `status` 为 `UNMATCHED`、`candidates` 为空数组的结果。
-                4. 只输出 JSON 对象本身。禁止 Markdown 标题、加粗、表格、代码围栏、汇总段落和任何解释文字，
+                4. `eligible=false` 的候选人可保留用于审计，但应用层会在推送前端前过滤掉；
+                   无人满足或有人被排除的关键原因必须写进顶层 `reason`，不要只写在候选人理由里。
+                5. 招标强制项中凡工具未返回数据、无法核验的（如社保记录、是否担任其他在建工程项目经理），
+                   必须逐项写入 `unverifiedRequirements` 数组并输出 `"requiresManualReview": true`，
+                   不得省略不提；`status` 仍按已核验项判定（已核验项满足即为 `MATCHED`，
+                   不要因存在待核验项而降级为 `PARTIAL`）。没有待核验项时输出 `[]` 与 `false`。
+                6. 只输出 JSON 对象本身。禁止 Markdown 标题、加粗、表格、代码围栏、汇总段落和任何解释文字，
                    也不要输出数组外壳或面向主 Agent/用户的建议。
-                5. 字符串内引用岗位/证书名称时使用中文引号（“”）；必须用英文双引号时写成 \\\"。
+                7. 字符串内引用岗位/证书名称时使用中文引号（“”）；必须用英文双引号时写成 \\\"。
                 """.formatted(projectSummary(requirements), LocalDate.now(), toJson(personnel));
     }
 
@@ -71,17 +78,20 @@ public class MatchPromptProvider {
                 %s
 
                 ## 执行要求
-                1. 必须调用 `query_qualifications` 查询企业资质。先用一次空 type 查询全部资质并复用结果，
-                   不得凭记忆编造资质、等级、证书编号或有效期。
+                1. 必须调用 `query_qualifications` 查询企业资质。按输入中出现的每个资质类型各查询一次
+                   （type 传类型关键词，模糊匹配，可并行发起），相同类型复用结果，不要重复查询，
+                   也不要空 type 全量查询；查不到时改用更短的关键词重试，不得凭记忆编造资质、等级、证书编号或有效期。
                 2. 按输入顺序逐条匹配；全部匹配完成后，一次性按顺序输出全部 `qualificationMatch` JSON 对象。
                    每个对象单独一行，对象之间只允许换行，不要输出“要求 1/要求 2”式小标题。
                 3. 输入中的每一条要求都必须有且仅有一个结果对象；没有可用资质时也要输出
                    `status` 为 `UNMATCHED`、`candidates` 为空数组的结果。
-                4. 对 `status=UNMATCHED` 且属于招标强制资格条件（施工总承包、安全生产许可证、ISO 三证）的结果，
+                4. `eligible=false` 的候选资质可保留用于审计，但应用层会在推送前端前过滤掉；
+                   无人满足或候选被排除的关键原因必须写进顶层 `reason`，不要只写在候选理由里。
+                5. 对 `status=UNMATCHED` 且属于招标强制资格条件（施工总承包、安全生产许可证、ISO 三证）的结果，
                    必须输出 `"requiresManualReview": true` 和 `"risk": "mandatory_qualification_missing"`。
-                5. 只输出 JSON 对象本身。禁止 Markdown 标题、加粗、表格、代码围栏、汇总段落和任何解释文字，
+                6. 只输出 JSON 对象本身。禁止 Markdown 标题、加粗、表格、代码围栏、汇总段落和任何解释文字，
                    也不要输出数组外壳或面向主 Agent/用户的建议。
-                6. 字符串内引用资质名称时使用中文引号（“”）；必须用英文双引号时写成 \\\"。
+                7. 字符串内引用资质名称时使用中文引号（“”）；必须用英文双引号时写成 \\\"。
                 """.formatted(projectSummary(requirements), LocalDate.now(), toJson(qualifications));
     }
 

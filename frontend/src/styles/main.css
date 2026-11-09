@@ -16,6 +16,10 @@
   --app-accent: #2563eb;
   --app-border: #e5e7eb;
   --app-muted: #6b7280;
+  /* 人工复核提醒统一配色：人员与资质共用同一个色系，避免出现多种提醒颜色 */
+  --app-review: #b45309;
+  --app-review-bg: #fffbeb;
+  --app-review-border: #fcd34d;
 }
 
 * {

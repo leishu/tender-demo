@@ -1,6 +1,6 @@
 # qualification-matcher 业务规则库
 
-版本：v1.0
+版本：v1.1
 基线：session-1793949849919-qualification（traceId b13f3bcaf17c276170ef32b7bceebb45）
 
 ---
@@ -37,7 +37,9 @@
 
 ### R2-4 有效期判断错误（HIGH）
 
-**判定**：`validUntil` 早于"当前日期"（从 input 的 `## 当前日期` 提取），但 output 中 `expired=false` 或 `eligible=true`。
+**判定**：`validUntil` 早于"当前日期"，但 output 中 `expired=false` 或 `eligible=true`。
+
+**当前日期提取**：优先从 input 的 `## 当前日期` 段提取；该段缺失或格式变化时，回退用 trace 最早 `startTime` 的日期（UTC 转本地日期），并在报告 `warnings` 中注明使用了回退基准。
 
 **证据示例**：`validUntil="2025-03-31"`，当前日期 `2026-11-06`，但 `expired=false`。
 
@@ -83,4 +85,4 @@
 | 日期 | 新增规则 | 触发来源 |
 |---|---|---|
 | 2026-11-06 | R2-1~R2-4、R3-1~R3-3 初始版本 | session-1793949849919 |
-```
+| 2026-11-09 | v1.1：R2-4 当前日期提取增加 trace startTime 回退基准 | trace ebe7faab5efce14377c805d1b899f799 复盘 |

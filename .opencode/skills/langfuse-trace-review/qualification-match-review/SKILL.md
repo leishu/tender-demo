@@ -23,4 +23,3 @@ description: 诊断 qualification-matcher 子 Agent 的 Langfuse Trace，重点�
 - 只诊断，不改代码。
 - 业务规则不覆盖其他 Agent（人员匹配走 `personnel-match-review`）。
 - 若 trace 中无 `entityType=qualificationMatch` 输出，报告 `warnings` 注明"未发现资质匹配输出，可能不是完整匹配任务"。
-```

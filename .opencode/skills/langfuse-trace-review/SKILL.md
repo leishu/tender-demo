@@ -54,38 +54,45 @@ description: 诊断 Langfuse Trace JSON 文件的通用引擎，负责解析结�
 
 ### 第 3 步：加载业务规则包
 
-根据 `metadata["attributes.gen_ai.agent.name"]`（缺失时回退到 `metadata["attributes.gen_ai.agent.id"]` 或顶层 AGENT 的 `name` 解析出的 agent 名）选择规则包：
+根据 `metadata["attributes.gen_ai.agent.name"]`（缺失时回退到 `metadata["attributes.gen_ai.agent.id"]` 或顶层 AGENT 的 `name` 解析出的 agent 名）选择规则包。
+
+**路径基准**：下表路径均相对本 SKILL.md 所在目录（`.opencode/skills/langfuse-trace-review/`），规则包嵌套在本目录内，不要写 `../`。
 
 | agentName | 规则包路径 |
 |---|---|
-| `qualification-matcher` | `../qualification-match-review/references/qualification-rules.md` |
-| `personnel-matcher` | `../personnel-match-review/references/personnel-rules.md` |
-| `tender-parser` | `../tender-parser-review/references/tender-parser-rules.md` |
-| `catalog-builder` | `../catalog-builder-review/references/catalog-builder-rules.md` |
-| `chapter-writer` | `../chapter-writer-review/references/chapter-writer-rules.md` |
+| `qualification-matcher` | `qualification-match-review/references/qualification-rules.md` |
+| `personnel-matcher` | `personnel-match-review/references/personnel-rules.md` |
+| `tender-parser` | `tender-parser-review/references/tender-parser-rules.md` |
+| `catalog-builder` | `catalog-builder-review/references/catalog-builder-rules.md` |
+| `chapter-writer` | `chapter-writer-review/references/chapter-writer-rules.md` |
 | 其他/未识别 | 不加载，报告中注明 `"businessRulesLoaded": false` |
 
 规则包不存在时，只输出 R1/R4 结果，并在报告 `warnings` 中说明。
 
 ### 第 4 步：输出报告
 
-严格按 `references/diagnostic-method.md` 中的 JSON schema 输出。**不要在 JSON 前后加解释文字，不要用 Markdown 围栏包裹整个 JSON**（保证下游可直接 `JSON.parse`）。如果用户明确要求 Markdown 格式，才改用 `diagnostic-method.md` 里附带的 Markdown 模板。
+严格按 `references/diagnostic-method.md` 中的 JSON schema 生成报告。
+
+**默认交付方式（文件 + 链接，适用于所有会话）**：把报告 JSON 写入 `logs/langfuse/reports/{traceId}.json`（目录不存在则创建；这是本 skill 唯一允许的文件写入），写入后**必须读回文件做 `JSON.parse` 等价校验**（并核对 evidence 均为 trace 原文），聊天里只给一句话结论 + 报告文件链接 + 可读摘要，不粘贴裸 JSON。原因：聊天文本的复制/渲染管线会破坏转义引号（如 `\"`），导致下游 `JSON.parse` 失败（2026-11-09 曾实际发生）。
+
+**例外**：仅当调用方明确要求"在对话中直接输出可 parse 的裸 JSON"时，才不写文件、直接输出——不要在 JSON 前后加解释文字，不要用 Markdown 围栏包裹整个 JSON。如果用户明确要求 Markdown 格式，改用 `diagnostic-method.md` 里附带的 Markdown 模板。
 
 ## 约束
 
-- **只诊断，不改代码**。不修改任何文件，只输出建议。
+- **只诊断，不改代码**。不修改业务代码与 trace 源文件；唯一允许的写入是把诊断报告保存到 `logs/langfuse/reports/{traceId}.json`（见第 4 步）。
 - **证据优先**：每条 finding 必须含 `observationId` + `evidence`（原文片段，≤200 字符）。无证据的 finding 不输出。
 - **区分模型问题与工程问题**：格式违规优先归因为"提示词约束不够硬 / 缺少输出校验 / 缺少重试"，不是"模型能力不足"。
 - **不臆测未出现的字段**：trace 里没有 `scores` 就不在报告里提 score 相关结论。
-- **null output 处理**：AGENT 或 SPAN 节点 output 为 null 不判违规；GENERATION output 为 null 判 `CRITICAL`（模型调用未返回内容）。
-- **severity 映射**：最终 GENERATION（时间线最后一个）格式违规 → `CRITICAL`；中间 GENERATION 格式违规 → `MEDIUM`；业务规则包定义的 HIGH/CRITICAL 按规则包执行。
+- **null output 处理**：AGENT 或 SPAN 节点 output 为 null 不判违规。GENERATION output 为 null 时**先判断是否为工具调用轮**：满足以下任一证据即视为工具调用轮，判 `DATA_QUALITY`（MEDIUM，埋点未记录 tool_calls），不判模型失败——① 存在紧随其后执行的 TOOL 子节点（TOOL.startTime ≥ 该 GENERATION.endTime）；② `usageDetails.output > 0`；③ metadata 含 tool_calls 或表达调用意图的 thinking。仅当以上证据均不满足（模型确实未返回任何内容）时才判 `CRITICAL`。偏离默认判定时在 `warnings` 中说明依据。
+- **severity 映射**：最终 GENERATION（时间线中最后一个 `type=GENERATION` 的节点）格式违规 → `CRITICAL`；中间 GENERATION 格式违规 → `MEDIUM`；业务规则包定义的 HIGH/CRITICAL 按规则包执行。
 
 ## 自查清单（输出前逐项确认）
 
-- [ ] 时间线是否覆盖全部 observations，latencyPct 合计接近 100%？
+- [ ] 时间线是否覆盖全部 observations？叶子节点（排除 AGENT/SPAN 等容器节点）的 latencyPct 合计是否接近 100%？（容器节点包含子节点耗时，全量合计会超过 100%，属正常）
 - [ ] 每条 finding 是否都有 observationId 和原文证据？
 - [ ] 是否区分了 FORMAT_VIOLATION / BUSINESS_RISK / DATA_QUALITY / PERFORMANCE？
 - [ ] 最终 GENERATION 是否被单独检查？
+- [ ] output=null 的 GENERATION 是否先排除了工具调用轮，再判 CRITICAL？
 - [ ] 建议是否指明了具体修改位置（文件/提示词段落/校验层），而非"优化提示词"？
 - [ ] 业务规则包是否正确加载，未加载时是否在 warnings 说明？
 - [ ] 是否至少列出 1 条 positiveFindings（若确实没有，写空数组并说明原因）？

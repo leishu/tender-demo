@@ -38,11 +38,19 @@ public class EnterpriseRepository {
         this.certificateMapper = certificateMapper;
     }
 
-    /** 按资质类型查询，type 为空则返回全部 */
+    /**
+     * 按资质关键词模糊查询，type 为空则返回全部。
+     * 关键词同时匹配 type 与 name：招标写法与库中名称常有等级/后缀差异
+     * （如“施工总承包”vs“建筑工程施工总承包壹级”），也可能用名称查编号类资质
+     * （如“质量管理体系”vs type=ISO9001）。
+     */
     public List<Qualification> findQualifications(String type) {
         LambdaQueryWrapper<Qualification> wrapper = new LambdaQueryWrapper<>();
         if (StringUtils.hasText(type)) {
-            wrapper.eq(Qualification::getType, type);
+            String keyword = type.trim();
+            wrapper.and(w -> w.like(Qualification::getType, keyword)
+                    .or()
+                    .like(Qualification::getName, keyword));
         }
         return qualificationMapper.selectList(wrapper);
     }
@@ -59,13 +67,35 @@ public class EnterpriseRepository {
     /**
      * 按岗位关键词查询人员，role 为空则返回全部；每人带上岗位与证书。
      * 岗位在 t_personnel_role 中是一人多行，这里先按关键词捞出人员 id 再查主表，
-     * 关键词用 like 而非等值，避免「项目负责人」查不到「项目经理」这类漏查。
+     * 关键词用 like 而非等值，避免漏查。
      */
     public List<Personnel> findPersonnel(String role) {
+        return findPersonnelByRoles(StringUtils.hasText(role) ? List.of(role.trim()) : List.of());
+    }
+
+    /**
+     * 按一组岗位关键词查询人员（别名字典展开后的词组），任一关键词命中即可；
+     * 词组为空返回全部。MySQL 只做普通 OR LIKE 过滤，语义归并在 Java 工具层完成。
+     */
+    public List<Personnel> findPersonnelByRoles(List<String> roleKeywords) {
+        List<String> keywords = roleKeywords == null ? List.of()
+                : roleKeywords.stream()
+                        .filter(StringUtils::hasText)
+                        .map(String::trim)
+                        .distinct()
+                        .toList();
         LambdaQueryWrapper<Personnel> wrapper = new LambdaQueryWrapper<>();
-        if (StringUtils.hasText(role)) {
-            List<Long> ids = roleMapper
-                    .selectList(new LambdaQueryWrapper<PersonnelRole>().like(PersonnelRole::getRole, role))
+        if (!keywords.isEmpty()) {
+            LambdaQueryWrapper<PersonnelRole> roleWrapper = new LambdaQueryWrapper<PersonnelRole>()
+                    .and(w -> {
+                        for (int i = 0; i < keywords.size(); i++) {
+                            if (i > 0) {
+                                w.or();
+                            }
+                            w.like(PersonnelRole::getRole, keywords.get(i));
+                        }
+                    });
+            List<Long> ids = roleMapper.selectList(roleWrapper)
                     .stream()
                     .map(PersonnelRole::getPersonnelId)
                     .distinct()

@@ -26,4 +26,3 @@ description: 诊断 personnel-matcher 子 Agent 的 Langfuse Trace，重点检�
 - 业务规则不覆盖资质匹配（走 `qualification-match-review`）。
 - 若 trace 中无 `entityType=personnelMatch` 输出，报告 `warnings` 注明"未发现人员匹配输出，可能不是完整匹配任务"。
 - **人员信息属敏感数据**：报告中 `evidence` 字段对身份证号、手机号做脱敏（保留前 3 后 4），不得输出完整证件号。
-```

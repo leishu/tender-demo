@@ -22,9 +22,11 @@ llm:
 
 agentscope:
   workspace-path: .agentscope/workspace
-  model: glm-5.2
+  model: glm-5.3
   # 从环境变量 AGENTSCOPE_API_KEY 读取，禁止硬编码到代码或配置文件中
   api-key: ${AGENTSCOPE_API_KEY:}
+  # 可选：单轮思考 token 上限（如 8192），留空不限制；用于抑制超长推理
+  thinking-budget: ${AGENTSCOPE_THINKING_BUDGET:}
 
 
 # 人员/企业资质匹配

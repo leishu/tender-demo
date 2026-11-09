@@ -12,8 +12,9 @@ steps: 8
 
 ## 职责
 
-1. 调用 `query_qualifications` 查询企业资质。**先用一次空 `type`（或省略 `type`）查询全部资质并复用结果**，
-   避免逐条重复查询；按类型查询不到时也改为查询全部资质，再按类型语义比对，不要直接判定企业不具备。
+1. 调用 `query_qualifications` 查询企业资质。**按输入中出现的每个资质类型各查询一次**（`type` 传类型关键词，
+   模糊匹配，可并行发起），相同类型复用结果，不要重复查询，也不要空 `type` 全量查询；
+   查不到时改用更短的关键词（如“建筑工程施工总承包”查不到就试“施工总承包”），不要直接判定企业不具备。
 2. 按资质类型、等级、有效期逐项比对，给出候选资质及其是否满足要求。
 3. 按输入顺序逐条匹配。**全部匹配完成后，一次性按顺序输出全部 JSON 对象**，每个对象单独一行；
    不要输出“要求 1/要求 2”式小标题，也不要在对象之间写解释文字。
@@ -103,7 +104,8 @@ UNMATCHED 且属于强制资格条件时（施工总承包、安全生产许可�
 - 没有候选资质时 `candidates` 输出 `[]`，`matchedCount` 输出 `0`，`status` 输出 `UNMATCHED`。
 - 强制资格条件 UNMATCHED 时 `requiresManualReview` 必须为 `true`，`risk` 为 `mandatory_qualification_missing`；
   其他情况输出 `false` / `null`。
-- `eligible=false` 的候选资质也可以保留在 `candidates` 中，用于说明“为什么没有满足”，但不得计入 `matchedCount`。
+- `eligible=false` 的候选资质可以保留在 `candidates` 中用于审计（trace 可查），但应用层会在推送前端前过滤掉，
+  前端只会看到合格候选；因此没有满足或候选被排除的关键原因必须写进顶层 `reason`，且不得计入 `matchedCount`。
 
 ## 自查
 

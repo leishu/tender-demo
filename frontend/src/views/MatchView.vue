@@ -2,10 +2,11 @@
 import { computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { Close, Loading, VideoPlay } from '@element-plus/icons-vue'
+import { Close, Loading, VideoPlay, Warning } from '@element-plus/icons-vue'
 import { useTenderMatch } from '@/composables/useTenderMatch'
 import { useWorkflowStore } from '@/stores/workflow'
-import type { MatchStatus } from '@/api/types'
+import { cleanList, summarizeManualReview } from '@/features/match/review'
+import type { MatchStatus, PersonnelMatchResult } from '@/api/types'
 
 const router = useRouter()
 const workflow = useWorkflowStore()
@@ -71,15 +72,14 @@ const progressText = computed(() => {
 const personnelSummary = computed(() => summarize(personnelResults.value))
 const qualificationSummary = computed(() => summarize(qualificationResults.value))
 
-const manualReviewItems = computed(() =>
-  qualificationResults.value.filter((item) => item.requiresManualReview),
+const manualReview = computed(() =>
+  summarizeManualReview(personnelResults.value, qualificationResults.value),
 )
 
-const manualReviewListText = computed(() =>
-  manualReviewItems.value
-    .map((item) => item.requiredType || `要求 #${item.requirementId ?? '未知'}`)
-    .join('、'),
-)
+/** 人员侧待人工核验项，统一用复核色展示。 */
+function unverifiedItems(item: PersonnelMatchResult) {
+  return cleanList(item.unverifiedRequirements)
+}
 
 const personnelFiltered = computed(() =>
   onlyUnmet.value
@@ -290,18 +290,18 @@ async function runMatch() {
           </div>
         </template>
 
-        <el-alert
-          v-if="manualReviewItems.length"
-          type="error"
-          show-icon
-          :closable="false"
-          class="mb"
-          :title="`有 ${manualReviewItems.length} 项资质要求需人工复核，可能影响投标资格`"
-        >
-          <template #default>
-            <span>请优先核对：{{ manualReviewListText }}</span>
-          </template>
-        </el-alert>
+        <div v-if="manualReview.total" class="review-banner" role="status">
+          <el-icon class="review-banner-icon"><Warning /></el-icon>
+          <div>
+            <p class="review-banner-title">
+              有 {{ manualReview.total }} 条匹配结果需人工复核，可能影响投标资格
+            </p>
+            <p class="review-banner-detail">请优先核对：{{ manualReview.listText }}</p>
+            <p v-if="manualReview.unverifiedCount" class="review-banner-detail">
+              其中 {{ manualReview.unverifiedCount }} 项招标强制要求缺少可核验数据，无法自动判定。
+            </p>
+          </div>
+        </div>
 
         <el-tabs v-model="activeTab">
           <el-tab-pane :label="`人员匹配 (${personnelResults.length})`" name="personnel">
@@ -320,6 +320,7 @@ async function runMatch() {
                     <el-tag :type="matchStatusMeta(item.status).type" size="small" effect="dark">
                       {{ matchStatusMeta(item.status).label }}
                     </el-tag>
+                    <span v-if="item.requiresManualReview" class="review-chip">需人工复核</span>
                     <strong>{{ item.role || '未命名岗位' }}</strong>
                     <span v-if="item.requiredQuantity != null" class="muted">
                       需 {{ item.requiredQuantity }} 人
@@ -333,6 +334,13 @@ async function runMatch() {
 
                 <div class="match-meta">
                   <span>证书/职称：{{ item.certificate || '无特别要求' }}</span>
+                </div>
+
+                <div v-if="unverifiedItems(item).length" class="review-note">
+                  <p class="review-note-title">以下招标强制项缺少可核验数据，需人工核对</p>
+                  <ul class="review-note-list">
+                    <li v-for="text in unverifiedItems(item)" :key="text">{{ text }}</li>
+                  </ul>
                 </div>
 
                 <el-alert
@@ -415,14 +423,7 @@ async function runMatch() {
                     <el-tag :type="matchStatusMeta(item.status).type" size="small" effect="dark">
                       {{ matchStatusMeta(item.status).label }}
                     </el-tag>
-                    <el-tag
-                      v-if="item.requiresManualReview"
-                      type="danger"
-                      size="small"
-                      effect="dark"
-                    >
-                      需人工复核
-                    </el-tag>
+                    <span v-if="item.requiresManualReview" class="review-chip">需人工复核</span>
                     <strong>{{ item.requiredType || '未命名资质' }}</strong>
                     <span class="muted">等级：{{ item.requiredLevel || '不限' }}</span>
                     <span class="muted">候选 {{ item.matchedCount ?? 0 }} 项</span>
@@ -434,7 +435,7 @@ async function runMatch() {
 
                 <div class="match-meta">
                   <span>有效期要求：{{ item.validRequirement || '无特别要求' }}</span>
-                  <span v-if="item.risk" class="muted">风险标识：{{ item.risk }}</span>
+                  <span v-if="item.risk" class="review-inline">风险标识：{{ item.risk }}</span>
                 </div>
 
                 <el-alert
@@ -540,6 +541,76 @@ async function runMatch() {
   line-height: 1.2;
 }
 
+.review-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  margin-bottom: 12px;
+  border: 1px solid var(--app-review-border);
+  border-left: 4px solid var(--app-review);
+  border-radius: 8px;
+  background: var(--app-review-bg);
+  color: var(--app-review);
+  line-height: 1.6;
+}
+
+.review-banner-icon {
+  margin-top: 2px;
+  font-size: 16px;
+}
+
+.review-banner p {
+  margin: 0;
+}
+
+.review-banner-title {
+  font-weight: 600;
+}
+
+.review-banner .review-banner-detail {
+  margin-top: 4px;
+}
+
+.review-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: var(--app-review);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 20px;
+  white-space: nowrap;
+}
+
+.review-note {
+  padding: 10px 12px;
+  margin-top: 10px;
+  border: 1px dashed var(--app-review-border);
+  border-radius: 8px;
+  background: var(--app-review-bg);
+  color: var(--app-review);
+  font-size: 13px;
+}
+
+.review-note-title {
+  margin: 0 0 4px;
+  font-weight: 600;
+}
+
+.review-note-list {
+  margin: 0;
+  padding-left: 18px;
+  line-height: 1.7;
+}
+
+.review-inline {
+  color: var(--app-review);
+}
+
 .match-list {
   display: flex;
   flex-direction: column;
@@ -578,6 +649,9 @@ async function runMatch() {
 }
 
 .match-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
   margin-top: 6px;
   color: var(--app-muted);
   font-size: 13px;

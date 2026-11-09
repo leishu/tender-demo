@@ -44,9 +44,17 @@ public class MatchingController {
                       两路都结束后同样推送 `completed`。
 
                     ### 匹配状态
-                    - `MATCHED`：全部满足
+                    - `MATCHED`：可核验项全部满足（不代表没有待人工复核项，见下）
                     - `PARTIAL`：部分满足（如证书过期、等级不足、人数不够）
                     - `UNMATCHED`：没有可用数据
+
+                    ### 人工复核标记
+                    - `requiresManualReview=true` 表示该条结论需人工复核，客户端应告警，不能当作确定通过。
+                    - 资质侧：强制资格 `UNMATCHED` 时必为 true，并带 `risk=mandatory_qualification_missing`。
+                    - 人员侧：`unverifiedRequirements` 逐项列出工具无数据、无法核验的招标强制项
+                      （如社保记录月数、是否担任其他在建工程项目经理）；非空时必为 true。
+                    - 待核验项不会把 `status` 从 `MATCHED` 降级，客户端需把状态与复核标记一并展示。
+                    - 标记由应用层强制兜底，不依赖模型自觉输出。
 
                     ### 失败说明
                     - `tenderRequirementId` 为空返回 400 Bad Request。

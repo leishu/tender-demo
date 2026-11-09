@@ -20,6 +20,7 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.util.StringUtils;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.Base64;
 
 /**
@@ -72,7 +73,11 @@ public class LangfuseTracingConfig {
         SdkTracerProvider tracerProvider = SdkTracerProvider.builder()
                 .setResource(resource)
                 .setSampler(Sampler.parentBased(Sampler.traceIdRatioBased(sampleRate(properties))))
-                .addSpanProcessor(BatchSpanProcessor.builder(exporterBuilder.build()).build())
+                // 默认 5s 批量导出；缩短到 2s，降低进程退出前 span 还在队列里导致
+                // trace 缺节点（如 AGENT 根节点/最后一轮 GENERATION）的概率
+                .addSpanProcessor(BatchSpanProcessor.builder(exporterBuilder.build())
+                        .setScheduleDelay(Duration.ofSeconds(2))
+                        .build())
                 .build();
 
         OpenTelemetrySdk sdk = OpenTelemetrySdk.builder()

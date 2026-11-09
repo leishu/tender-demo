@@ -127,6 +127,8 @@ type PersonnelMatchResult = {
   status?: MatchStatus
   matchedCount?: number
   candidates?: PersonnelMatchCandidate[]
+  requiresManualReview?: boolean
+  unverifiedRequirements?: string[]
   reason?: string
 }
 
