@@ -50,6 +50,8 @@ public class ElasticsearchConfig {
         Rest5ClientBuilder builder = Rest5Client.builder(uris.toArray(URI[]::new));
 
         List<Header> headers = new ArrayList<>();
+        // 认证头与 EsInferenceEmbeddingClient 共用 EsAuthHeaders（ApiKey 优先、Basic 兜底），
+        // 保证官方客户端与 /_inference 裸 HTTP 调用规则一致，避免安全集群上一边能连、一边 401
         String authorization = EsAuthHeaders.authorization(es);
         if (authorization != null) {
             headers.add(new BasicHeader("Authorization", authorization));

@@ -130,6 +130,9 @@
                 </configuration>
             </plugin>
 
+            <!-- Spring Boot 父 POM 只在 pluginManagement 中声明该插件，不会自动执行；
+                 必须在此显式引入，mvn package 才会执行 repackage 产出可执行 fat jar，
+                 否则产物是普通 jar，java -jar 启动会报 no main manifest attribute -->
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
