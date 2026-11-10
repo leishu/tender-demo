@@ -21,6 +21,8 @@ export function useTenderMatch() {
   const finishedAt = ref<number | null>(null)
   const controller = shallowRef<AbortController | null>(null)
   let runId = 0
+  // 只有收到 completed 事件才算正常结束；连接关闭本身不代表匹配成功
+  let sawCompleted = false
 
   const isRunning = computed(() => status.value === 'connecting' || status.value === 'streaming')
   const receivedCount = computed(
@@ -60,8 +62,12 @@ export function useTenderMatch() {
           if (status.value === 'done' || status.value === 'error' || status.value === 'cancelled') {
             return
           }
-          if (!hasData.value && !errors.value.length) {
-            errorMessage.value = '匹配流已结束，但未返回任何结果'
+          // 连接被服务端/网关中途断开时，结果可能不完整；不能当成成功
+          if (!sawCompleted) {
+            errorMessage.value =
+              hasData.value || errors.value.length
+                ? '匹配流在收到完成信号前中断，已返回的结果可能不完整，请重试'
+                : '匹配流已结束，但未返回任何结果'
             finish('error')
             return
           }
@@ -108,6 +114,7 @@ export function useTenderMatch() {
         errors.value.push(event.message ?? '匹配失败')
         return
       case 'completed':
+        sawCompleted = true
         finish('done')
         return
     }
@@ -135,6 +142,7 @@ export function useTenderMatch() {
     qualificationResults.value = []
     startedAt.value = null
     finishedAt.value = null
+    sawCompleted = false
   }
 
   onScopeDispose(() => controller.value?.abort())

@@ -37,6 +37,20 @@ public class TenderRequirementsService {
     }
 
     /**
+     * 按 id 删除招标要求及其四张子表。
+     *
+     * <p>主表与子表必须在同一事务内删除：任一子表删除失败时整体回滚，
+     * 否则会留下“主表已删、子表成孤儿”或“子表已删、主表还在”的半删除状态。</p>
+     */
+    @Transactional
+    public void deleteById(Long id) {
+        if (id == null) {
+            throw new IllegalArgumentException("招标要求 id 不能为空");
+        }
+        requirementRepository.deleteById(id);
+    }
+
+    /**
      * 查询已解析招标文件列表（按录入时间倒序），并补充"是否已保存投标目录"状态。
      *
      * @param keyword 项目名称模糊匹配关键字，为空时返回全部

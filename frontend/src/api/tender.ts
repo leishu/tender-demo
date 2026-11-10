@@ -26,9 +26,18 @@ export const tenderApi = {
     return unwrap<TenderRequirementSummary[]>(result)
   },
 
-  async confirm(body: TenderRequirements, signal?: AbortSignal): Promise<number> {
+  /**
+   * 确认入库。传入 idempotencyKey 时，服务端同一 key 只会入库一次，
+   * 重复点击/网络重试会拿回首次创建的主键，不会产生重复数据。
+   */
+  async confirm(
+    body: TenderRequirements,
+    signal?: AbortSignal,
+    idempotencyKey?: string,
+  ): Promise<number> {
     const result = await client.POST('/tender/parse/confirm', {
       body,
+      headers: idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined,
       signal: withTimeout(signal, SHORT_TIMEOUT),
     })
     return unwrap<number>(result)

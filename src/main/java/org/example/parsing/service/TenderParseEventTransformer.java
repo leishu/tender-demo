@@ -67,13 +67,14 @@ public class TenderParseEventTransformer {
      */
     public Flux<TenderParseEvent<?>> toSse(Flux<AgentEvent> events) {
         return Flux.defer(() -> {
-            final StringBuilder buffer = new StringBuilder();
+            // 用增量 Reader 而不是 StringBuilder：每个 delta 只扫描新增片段，长输出下避免 O(n²)
+            final JsonStreamExtractor.Reader reader = new JsonStreamExtractor.Reader();
 
             return events
                     .concatMap(event -> {
                         if (event instanceof TextBlockDeltaEvent d) {
-                            buffer.append(d.getDelta());
-                            return extractRequirements(buffer, mapper);
+                            reader.append(d.getDelta());
+                            return extractRequirements(reader, mapper);
                         } else if (event instanceof AgentResultEvent) {
                             log.info("解析招标文件完成，发送 completed 信号");
                             return Flux.just(TenderParseEvent.completed());
@@ -87,10 +88,11 @@ public class TenderParseEventTransformer {
         });
     }
 
-    private Flux<TenderParseEvent<?>> extractRequirements(StringBuilder buffer, JsonMapper mapper) {
+    private Flux<TenderParseEvent<?>> extractRequirements(JsonStreamExtractor.Reader reader,
+                                                          JsonMapper mapper) {
         List<TenderParseEvent<?>> results = new ArrayList<>();
         String json;
-        while ((json = JsonStreamExtractor.takeFirstCompleteJson(buffer)) != null) {
+        while ((json = reader.poll()) != null) {
             try {
                 JsonNode node = mapper.readTree(json);
                 Map.Entry<String, ? extends TenderModel> entry = dispatch(node, mapper);

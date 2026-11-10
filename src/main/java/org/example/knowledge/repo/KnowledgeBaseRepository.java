@@ -58,6 +58,11 @@ public class KnowledgeBaseRepository {
 
     /**
      * 批量写入文档。
+     *
+     * <p>按批提交 bulk，任一批失败时按本次全部文档 id 做补偿清理：
+     * 单批内部的失败由 {@link #bulkIndex} 自行清理，但前面已成功批次写入的
+     * 文档也必须一并删掉，否则会残留“计数未累加、检索却能搜到”的数据，
+     * 用户重试时还会产生重复文档。</p>
      */
     public void saveAll(List<KnowledgeDocument> documents) {
         if (documents == null || documents.isEmpty()) {
@@ -65,9 +70,16 @@ public class KnowledgeBaseRepository {
         }
         ensureIndex();
 
-        for (int from = 0; from < documents.size(); from += BULK_BATCH_SIZE) {
-            int to = Math.min(from + BULK_BATCH_SIZE, documents.size());
-            bulkIndex(documents.subList(from, to));
+        List<String> allIds = documents.stream().map(KnowledgeDocument::getId).toList();
+        try {
+            for (int from = 0; from < documents.size(); from += BULK_BATCH_SIZE) {
+                int to = Math.min(from + BULK_BATCH_SIZE, documents.size());
+                bulkIndex(documents.subList(from, to));
+            }
+        } catch (RuntimeException e) {
+            // 删除不存在的 id 在 ES 中是 no-op，重复清理失败批次是安全的
+            deleteByIds(allIds);
+            throw e;
         }
     }
 
@@ -189,6 +201,24 @@ public class KnowledgeBaseRepository {
         }
     }
 
+    /**
+     * 按 id 批量删除文档，主要用于写入失败后的补偿清理。
+     */
+    public void deleteByIds(List<String> ids) {
+        if (ids == null || ids.isEmpty()) {
+            return;
+        }
+        BulkRequest.Builder request = new BulkRequest.Builder();
+        for (String id : ids) {
+            request.operations(op -> op.delete(d -> d.index(properties.getIndexName()).id(id)));
+        }
+        try {
+            client.bulk(request.refresh(Refresh.WaitFor).build());
+        } catch (IOException e) {
+            log.warn("清理 Elasticsearch 文档失败，可能残留部分数据: ids={}", ids, e);
+        }
+    }
+
     private void bulkIndex(List<KnowledgeDocument> documents) {
         BulkRequest.Builder request = new BulkRequest.Builder();
         for (KnowledgeDocument document : documents) {
@@ -198,11 +228,15 @@ public class KnowledgeBaseRepository {
                     .document(document)));
         }
 
+        List<String> ids = documents.stream().map(KnowledgeDocument::getId).toList();
+
         BulkResponse response;
         try {
             // 写入后立即刷新，保证“保存完马上查询”能命中新数据
             response = client.bulk(request.refresh(Refresh.WaitFor).build());
         } catch (IOException e) {
+            // bulk 可能已写入部分文档，按本次生成的 id 清理，避免留下数据库里不存在的“幽灵文档”
+            deleteByIds(ids);
             throw new IllegalStateException("写入 Elasticsearch 失败", e);
         }
 
@@ -211,6 +245,7 @@ public class KnowledgeBaseRepository {
                     .filter(item -> item.error() != null)
                     .map(this::describeFailure)
                     .collect(Collectors.joining("; "));
+            deleteByIds(ids);
             throw new IllegalStateException("部分文档写入 Elasticsearch 失败: " + message);
         }
     }

@@ -14,11 +14,14 @@ import org.example.parsing.model.dto.TenderRequirementSummary;
 import org.example.parsing.model.req.TenderRequest;
 import org.example.parsing.service.TenderParseEventTransformer;
 import org.example.parsing.service.TenderRequirementsService;
+import org.example.service.IdempotencyStore;
 import org.example.service.RuntimeContextBuilder;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -37,15 +40,18 @@ public class TenderController {
     private final TenderRequirementsService requirementService;
     private final TenderParseEventTransformer eventTransformer;
     private final RuntimeContextBuilder contextBuilder;
+    private final IdempotencyStore idempotencyStore;
 
     public TenderController(ObjectProvider<HarnessAgent.Builder> builderProvider,
                             TenderRequirementsService requirementService,
                             TenderParseEventTransformer eventTransformer,
-                            RuntimeContextBuilder contextBuilder) {
+                            RuntimeContextBuilder contextBuilder,
+                            IdempotencyStore idempotencyStore) {
         this.builderProvider = builderProvider;
         this.requirementService = requirementService;
         this.eventTransformer = eventTransformer;
         this.contextBuilder = contextBuilder;
+        this.idempotencyStore = idempotencyStore;
     }
 
     @Operation(summary = "解析招标文件",
@@ -75,8 +81,13 @@ public class TenderController {
                     | `completed` | 结束信号（无 data） | - |
 
                     说明：同类型实体可能推送多条（如同一投标人要求拆成 2 条资质、4 条评分点）；各条均携带 `source` 原文出处片段便于复核。""")
-    @PostMapping("/parse")
+    @PostMapping(value = "/parse", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public Flux<TenderParseEvent<?>> parseTender(@RequestBody TenderRequest request) {
+        if (request.getTenderText() == null || request.getTenderText().isBlank()) {
+            // SSE 端点已在契约中约定“异常走 error 事件”，这里不抛 HTTP 异常，
+            // 避免 JSON 错误体与 text/event-stream 的 Accept 协商冲突
+            return Flux.just(TenderParseEvent.error("招标文件文本 tenderText 不能为空"));
+        }
         RuntimeContext ctx = contextBuilder.build(request.getUserId());
         UserMessage prompt = new UserMessage(
                 "请解析以下招标文件，提取结构化要求：\n" + request.getTenderText());
@@ -94,10 +105,20 @@ public class TenderController {
      * 确认解析结果并入库存档，返回入库后的主键 id
      */
     @Operation(summary = "确认解析结果并入库",
-            description = "将确认后的解析结果写入数据库，并返回入库后的主键 id。")
+            description = """
+                    将确认后的解析结果写入数据库，并返回入库后的主键 id。
+
+                    ### 幂等
+                    可携带 `Idempotency-Key` 请求头（建议使用 UUID）。同一 key 在有效期内重复提交
+                    只会入库一次，并返回首次创建的主键 id，避免重复点击或网络重试产生重复数据。
+                    """)
     @PostMapping("/parse/confirm")
-    public Mono<Long> confirmTender(@RequestBody TenderRequirements requirements) {
-        return Mono.fromCallable(() -> requirementService.save(requirements).getId());
+    public Mono<Long> confirmTender(
+            @RequestBody TenderRequirements requirements,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey) {
+        return Mono.fromCallable(() -> idempotencyStore.getOrCreate(idempotencyKey,
+                        () -> requirementService.save(requirements).getId()))
+                .subscribeOn(Schedulers.boundedElastic());
     }
 
     @Operation(summary = "查询已解析的招标文件列表",

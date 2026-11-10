@@ -26,6 +26,8 @@ export function useTenderParse() {
   const controller = shallowRef<AbortController | null>(null)
   let logId = 0
   let runId = 0
+  // 只有收到 completed 事件才算正常结束；连接关闭本身不代表解析成功
+  let sawCompleted = false
 
   const isRunning = computed(() => status.value === 'connecting' || status.value === 'streaming')
 
@@ -80,8 +82,11 @@ export function useTenderParse() {
           if (status.value === 'done' || status.value === 'error' || status.value === 'cancelled') {
             return
           }
-          if (!hasData.value) {
-            errorMessage.value = '解析流已结束，但未返回结构化数据'
+          // 连接被服务端/网关中途断开时，已收到的数据可能不完整；不能当成成功
+          if (!sawCompleted) {
+            errorMessage.value = hasData.value
+              ? '解析流在收到完成信号前中断，已返回的结果可能不完整，请重试'
+              : '解析流已结束，但未返回结构化数据'
             finish('error')
             return
           }
@@ -133,6 +138,7 @@ export function useTenderParse() {
       return
     }
     if (event.module === 'completed') {
+      sawCompleted = true
       finish('done')
       return
     }
@@ -162,6 +168,7 @@ export function useTenderParse() {
     startedAt.value = null
     finishedAt.value = null
     logId = 0
+    sawCompleted = false
   }
 
   /**

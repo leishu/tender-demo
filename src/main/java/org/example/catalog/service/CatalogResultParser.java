@@ -2,6 +2,7 @@ package org.example.catalog.service;
 
 import org.example.catalog.model.dto.CatalogNode;
 import org.example.catalog.model.dto.CatalogResult;
+import org.example.util.JsonStreamExtractor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
@@ -16,8 +17,9 @@ import java.util.List;
 /**
  * 将 catalog-generation 提示词返回的文本解析为 {@link CatalogResult}。
  *
- * <p>模型输出可能带 Markdown 代码块围栏、前后解释性文字，这里统一从首个
- * {@code &#123;} 开始按字符串感知的大括号配对截取首个完整 JSON 对象再反序列化；
+ * <p>模型输出可能带 Markdown 代码块围栏、前后解释性文字，这里统一交给
+ * {@link JsonStreamExtractor.Reader} 按字符串感知的大括号配对截取首个完整 JSON
+ * 对象（顺带修复正文中漏转义的裸引号）再反序列化；
  * 文本为空、找不到 JSON 或 JSON 不合法时按 502（上游返回异常）抛出。</p>
  */
 @Component
@@ -93,46 +95,20 @@ public class CatalogResultParser {
     }
 
     /**
-     * 截取文本中第一个完整闭合的 JSON 对象（带字符串感知的大括号配对）。
+     * 截取文本中第一个完整闭合的 JSON 对象。
      *
-     * @return 完整 JSON 原文；文本为空或大括号不闭合时返回 {@code null}
+     * <p>复用流式解析共用的 {@link JsonStreamExtractor.Reader}：字符串感知的大括号
+     * 配对，并修复模型漏转义的正文裸引号，与解析/匹配 SSE 链路保持同一套提取行为，
+     * 避免同一段模型输出在这边解析失败、在那边却能通过。</p>
+     *
+     * @return 完整 JSON 原文（裸引号已修复）；文本为空或大括号不闭合时返回 {@code null}
      */
     private String extractJsonObject(String raw) {
         if (raw == null || raw.isBlank()) {
             return null;
         }
-        int start = raw.indexOf('{');
-        if (start < 0) {
-            return null;
-        }
-        int depth = 0;
-        boolean inString = false;
-        boolean escaped = false;
-        for (int i = start; i < raw.length(); i++) {
-            char c = raw.charAt(i);
-            if (inString) {
-                if (escaped) {
-                    escaped = false;
-                } else if (c == '\\') {
-                    escaped = true;
-                } else if (c == '"') {
-                    inString = false;
-                }
-                continue;
-            }
-            switch (c) {
-                case '"' -> inString = true;
-                case '{' -> depth++;
-                case '}' -> {
-                    depth--;
-                    if (depth == 0) {
-                        return raw.substring(start, i + 1);
-                    }
-                }
-                default -> {
-                }
-            }
-        }
-        return null;
+        JsonStreamExtractor.Reader reader = new JsonStreamExtractor.Reader();
+        reader.append(raw);
+        return reader.poll();
     }
 }

@@ -10,8 +10,10 @@ import org.example.knowledge.model.KnowledgeBase;
 import org.example.knowledge.model.KnowledgeDocument;
 import org.example.knowledge.model.KnowledgeSearchHit;
 import org.example.knowledge.repo.KnowledgeBaseRepository;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.util.StringUtils;
 
 import java.util.ArrayList;
@@ -34,41 +36,59 @@ public class KnowledgeBaseService {
 
     private final KnowledgeBaseProperties properties;
 
+    /** 用编程式事务把“元数据落库/计数累加”与 ES 写入明确隔开 */
+    private final TransactionTemplate transactionTemplate;
+
     public KnowledgeBaseService(KnowledgeBaseRepository repository,
                                 EmbeddingClient embeddingClient,
                                 KnowledgeBaseMapper knowledgeBaseMapper,
-                                KnowledgeBaseProperties properties) {
+                                KnowledgeBaseProperties properties,
+                                PlatformTransactionManager transactionManager) {
         this.repository = repository;
         this.embeddingClient = embeddingClient;
         this.knowledgeBaseMapper = knowledgeBaseMapper;
         this.properties = properties;
+        this.transactionTemplate = new TransactionTemplate(transactionManager);
     }
 
-    @Transactional
+    /**
+     * 写入知识库文档。
+     *
+     * <p>顺序刻意拆成三步，保证事务边界正确：</p>
+     * <ol>
+     *   <li>短事务内创建/读取知识库元数据（MySQL）；</li>
+     *   <li>事务外做向量化并写入 Elasticsearch；ES 不是事务资源，
+     *       若包在数据库事务里，DB 回滚时 ES 文档已经写进去，无法撤销；</li>
+     *   <li>写入成功后再用单条 SQL 原子累加文档数。</li>
+     * </ol>
+     *
+     * <p>向量化失败时降级为纯全文写入（不写 embedding），而不是让整次写入失败。</p>
+     */
     public Long saveAll(String knowledgeBaseName, List<String> contents) {
         if (!StringUtils.hasText(knowledgeBaseName)) {
             throw new IllegalArgumentException("知识库名称不能为空");
         }
-        if (contents == null || contents.isEmpty()) {
-            KnowledgeBase kb = getOrCreateKnowledgeBase(knowledgeBaseName);
-            return kb.getId();
-        }
 
-        List<String> texts = contents.stream()
+        List<String> texts = contents == null ? List.of() : contents.stream()
                 .filter(StringUtils::hasText)
                 .map(String::trim)
                 .toList();
 
-        KnowledgeBase kb = getOrCreateKnowledgeBase(knowledgeBaseName);
-        Long knowledgeBaseId = kb.getId();
-
+        // 1) 元数据先落库：即使后面的 ES 写入失败，也只会留下一个空知识库，不会留下孤儿文档
+        Long knowledgeBaseId = transactionTemplate.execute(
+                status -> getOrCreateKnowledgeBase(knowledgeBaseName).getId());
         if (texts.isEmpty()) {
             return knowledgeBaseId;
         }
 
+        // 2) 向量化是外部调用，必须在事务外完成
         List<List<Float>> vectors = null;
         if (embeddingClient.isEnabled()) {
-            vectors = embeddingClient.embedDocuments(texts);
+            try {
+                vectors = embeddingClient.embedDocuments(texts);
+            } catch (EmbeddingException e) {
+                log.warn("知识库 [{}] 向量化失败，本次降级为纯全文索引", knowledgeBaseName, e);
+            }
         }
 
         long now = System.currentTimeMillis();
@@ -85,15 +105,14 @@ public class KnowledgeBaseService {
             documents.add(document);
         }
 
+        // 3) 写 ES（事务外）。失败时仓储层会按本次 id 清理已写入的部分，再抛出异常
         repository.saveAll(documents);
 
-        long newCount = kb.getDocumentCount() == null ? 0 : kb.getDocumentCount() + documents.size();
-        kb.setDocumentCount(newCount);
-        kb.setUpdatedAt(now);
-        knowledgeBaseMapper.updateById(kb);
+        // 4) 写入成功后再原子累加计数；失败只影响统计值，可由对账任务修复，不会产生幽灵文档
+        transactionTemplate.executeWithoutResult(status ->
+                knowledgeBaseMapper.incrementDocumentCount(knowledgeBaseId, documents.size(), now));
 
-        log.info("知识库 [{}]({}) 写入完成，新增 {} 条，累计 {} 条",
-                kb.getName(), knowledgeBaseId, documents.size(), newCount);
+        log.info("知识库 [{}]({}) 写入完成，新增 {} 条", knowledgeBaseName, knowledgeBaseId, documents.size());
         return knowledgeBaseId;
     }
 
@@ -136,11 +155,7 @@ public class KnowledgeBaseService {
     }
 
     private KnowledgeBase getOrCreateKnowledgeBase(String name) {
-        KnowledgeBase existing = knowledgeBaseMapper.selectOne(
-                new LambdaQueryWrapper<KnowledgeBase>()
-                        .eq(KnowledgeBase::getName, name)
-                        .eq(KnowledgeBase::getDeleted, false)
-                        .last("LIMIT 1"));
+        KnowledgeBase existing = findKnowledgeBase(name);
         if (existing != null) {
             return existing;
         }
@@ -155,7 +170,24 @@ public class KnowledgeBaseService {
         kb.setCreatedAt(now);
         kb.setUpdatedAt(now);
         kb.setDeleted(false);
-        knowledgeBaseMapper.insert(kb);
-        return kb;
+        try {
+            knowledgeBaseMapper.insert(kb);
+            return kb;
+        } catch (DuplicateKeyException e) {
+            // 并发首次写入时另一个请求已经创建了同名知识库，回查即可
+            KnowledgeBase concurrent = findKnowledgeBase(name);
+            if (concurrent != null) {
+                return concurrent;
+            }
+            throw e;
+        }
+    }
+
+    private KnowledgeBase findKnowledgeBase(String name) {
+        return knowledgeBaseMapper.selectOne(
+                new LambdaQueryWrapper<KnowledgeBase>()
+                        .eq(KnowledgeBase::getName, name)
+                        .eq(KnowledgeBase::getDeleted, false)
+                        .last("LIMIT 1"));
     }
 }

@@ -7,8 +7,8 @@ import org.springframework.stereotype.Component;
 import tools.jackson.databind.json.JsonMapper;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 
 @Component
 public class CatalogPromptProvider {
@@ -37,7 +37,11 @@ public class CatalogPromptProvider {
 
     public CatalogPromptProvider(@Value("classpath:prompts/catalog-generation.md") Resource resource,
                                  JsonMapper mapper) throws IOException {
-        this.template = Files.readString(resource.getFile().toPath(), StandardCharsets.UTF_8);
+        // 必须用 InputStream 读取：打成 jar 后 Resource#getFile() 会抛 FileNotFoundException，
+        // 只有 IDE / 解压目录运行时才碰巧可用。
+        try (InputStream in = resource.getInputStream()) {
+            this.template = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+        }
         this.mapper = mapper;
     }
 

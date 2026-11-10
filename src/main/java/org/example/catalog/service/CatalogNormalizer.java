@@ -4,6 +4,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.example.catalog.model.dto.CatalogGap;
 import org.example.catalog.model.dto.CatalogNode;
 import org.example.catalog.model.dto.CatalogResult;
+import org.example.util.Texts;
 import org.springframework.stereotype.Component;
 import org.springframework.util.CollectionUtils;
 import org.springframework.util.StringUtils;
@@ -133,11 +134,11 @@ public class CatalogNormalizer {
         if (value == null) {
             return null;
         }
-        int length = value.codePointCount(0, value.length());
+        int length = Texts.codePointLength(value);
         if (length <= max) {
             return value;
         }
         log.warn("投标目录{}超长，已截断：长度 {}，上限 {}", fieldDesc, length, max);
-        return value.substring(0, value.offsetByCodePoints(0, max));
+        return Texts.truncate(value, max);
     }
 }

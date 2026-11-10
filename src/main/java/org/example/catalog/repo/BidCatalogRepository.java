@@ -16,6 +16,7 @@ import org.example.catalog.model.dto.CatalogNode;
 import org.example.catalog.model.dto.CatalogResult;
 import org.example.parsing.mapper.ScoringItemMapper;
 import org.example.parsing.model.ScoringItem;
+import org.example.util.Texts;
 import org.springframework.stereotype.Repository;
 import org.springframework.util.CollectionUtils;
 import org.springframework.util.StringUtils;
@@ -358,11 +359,12 @@ public class BidCatalogRepository {
         return truncate(generated, CHAPTER_NO_MAX);
     }
 
-    /** 按字符截断到目标长度：超长则保留前 max 个字符，避免插入时触发 "Data too long" 报错 */
+    /**
+     * 按字符（code point）截断到目标长度：超长则保留前 max 个字符，
+     * 避免插入时触发 "Data too long" 报错，也避免把代理对截成乱码。
+     * 与 {@code CatalogValidator} 的校验口径保持一致。
+     */
     private static String truncate(String value, int max) {
-        if (value == null || value.length() <= max) {
-            return value;
-        }
-        return value.substring(0, max);
+        return Texts.truncate(value, max);
     }
 }

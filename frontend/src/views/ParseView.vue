@@ -30,6 +30,17 @@ const {
 
 const { loading: confirmLoading, error: confirmError, run: runConfirm } = useAsyncTask()
 
+/**
+ * 同一次解析结果复用同一个幂等键：重复点击或失败重试都不会重复入库。
+ * 重新解析时清空，避免旧 key 把新结果挡掉。
+ */
+let confirmIdempotencyKey: string | null = null
+
+function newIdempotencyKey(): string {
+  const uuid = globalThis.crypto?.randomUUID?.()
+  return uuid ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`
+}
+
 const step = computed(() => {
   if (workflow.tenderRequirementId) {
     return 3
@@ -78,6 +89,7 @@ function clearText() {
 
 async function startParse() {
   workflow.clearParsed()
+  confirmIdempotencyKey = null
   await start(tenderText.value, workflow.userId)
   if (status.value === 'done') {
     ElMessage.success('解析完成，请核对结果后确认入库')
@@ -86,7 +98,10 @@ async function startParse() {
 
 async function confirm() {
   const payload = toRequirements()
-  const id = await runConfirm((signal) => tenderApi.confirm(payload, signal))
+  confirmIdempotencyKey ??= newIdempotencyKey()
+  const id = await runConfirm((signal) =>
+    tenderApi.confirm(payload, signal, confirmIdempotencyKey ?? undefined),
+  )
   if (id === undefined) {
     return
   }

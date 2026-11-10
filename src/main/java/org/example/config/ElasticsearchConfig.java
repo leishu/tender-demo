@@ -16,9 +16,7 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.util.StringUtils;
 
 import java.net.URI;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.List;
 
 /**
@@ -52,13 +50,9 @@ public class ElasticsearchConfig {
         Rest5ClientBuilder builder = Rest5Client.builder(uris.toArray(URI[]::new));
 
         List<Header> headers = new ArrayList<>();
-        if (StringUtils.hasText(es.getApiKey())) {
-            headers.add(new BasicHeader("Authorization", "ApiKey " + es.getApiKey()));
-        } else if (StringUtils.hasText(es.getUsername())) {
-            String credentials = es.getUsername() + ":" + (es.getPassword() == null ? "" : es.getPassword());
-            String encoded = Base64.getEncoder()
-                    .encodeToString(credentials.getBytes(StandardCharsets.UTF_8));
-            headers.add(new BasicHeader("Authorization", "Basic " + encoded));
+        String authorization = EsAuthHeaders.authorization(es);
+        if (authorization != null) {
+            headers.add(new BasicHeader("Authorization", authorization));
         }
         if (!headers.isEmpty()) {
             builder.setDefaultHeaders(headers.toArray(Header[]::new));

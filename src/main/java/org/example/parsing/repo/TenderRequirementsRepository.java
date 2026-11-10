@@ -14,6 +14,7 @@ import org.example.parsing.model.QualificationRequirement;
 import org.example.parsing.model.ScoringItem;
 import org.example.parsing.model.TenderRequirements;
 import org.example.parsing.model.dto.TenderRequirementSummary;
+import org.example.util.Texts;
 import org.springframework.stereotype.Repository;
 import org.springframework.util.CollectionUtils;
 import org.springframework.util.StringUtils;
@@ -47,9 +48,14 @@ public class TenderRequirementsRepository {
     /**
      * 保存招标结构化要求，连同四张子表级联入库。
      * 入库前会对各字段做长度归一化（截断到对应列的最大长度），避免因超长导致写入异常。
+     *
+     * <p>主键与录入时间一律由服务端生成：调用方传入的 {@code id}（含子表 id）会被清空，
+     * 避免通过请求体指定主键覆盖已有记录（over-posting）。</p>
      */
     public TenderRequirements save(TenderRequirements requirements) {
         normalize(requirements);
+        // 新记录永远是 insert：忽略调用方传入的主键，避免覆盖历史数据
+        requirements.setId(null);
         // 录入时间统一由服务端写入，避免调用方漏传或传入客户端时间
         requirements.setRecordTime(System.currentTimeMillis());
         tenderRequirementsMapper.insert(requirements);
@@ -147,10 +153,11 @@ public class TenderRequirementsRepository {
             return;
         }
         for (QualificationRequirement item : list) {
+            item.setId(null);
             item.setTenderRequirementId(reqId);
             normalize(item);
-            qualificationRequirementMapper.insert(item);
         }
+        qualificationRequirementMapper.insertBatch(list);
     }
 
     private void savePerformances(Long reqId, List<PerformanceRequirement> list) {
@@ -158,10 +165,11 @@ public class TenderRequirementsRepository {
             return;
         }
         for (PerformanceRequirement item : list) {
+            item.setId(null);
             item.setTenderRequirementId(reqId);
             normalize(item);
-            performanceRequirementMapper.insert(item);
         }
+        performanceRequirementMapper.insertBatch(list);
     }
 
     private void savePersonnel(Long reqId, List<PersonnelRequirement> list) {
@@ -169,10 +177,11 @@ public class TenderRequirementsRepository {
             return;
         }
         for (PersonnelRequirement item : list) {
+            item.setId(null);
             item.setTenderRequirementId(reqId);
             normalize(item);
-            personnelRequirementMapper.insert(item);
         }
+        personnelRequirementMapper.insertBatch(list);
     }
 
     private void saveScoringItems(Long reqId, List<ScoringItem> list) {
@@ -180,10 +189,11 @@ public class TenderRequirementsRepository {
             return;
         }
         for (ScoringItem item : list) {
+            item.setId(null);
             item.setTenderRequirementId(reqId);
             normalize(item);
-            scoringItemMapper.insert(item);
         }
+        scoringItemMapper.insertBatch(list);
     }
 
     private List<QualificationRequirement> findQualifications(Long reqId) {
@@ -329,11 +339,11 @@ public class TenderRequirementsRepository {
         s.setSource(truncate(s.getSource(), SCORING_SOURCE_MAX));
     }
 
-    /** 按字符截断到目标长度：超长则保留前 max 个字符，避免插入时触发 "Data too long" 报错 */
+    /**
+     * 按字符（code point）截断到目标长度：超长则保留前 max 个字符，
+     * 避免插入时触发 "Data too long" 报错，也避免把代理对截成乱码。
+     */
     private static String truncate(String value, int max) {
-        if (value == null || value.length() <= max) {
-            return value;
-        }
-        return value.substring(0, max);
+        return Texts.truncate(value, max);
     }
 }

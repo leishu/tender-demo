@@ -39,6 +39,7 @@ public class TenderTools {
     public void deleteTenderRequirements(
             @ToolParam(name = "id", description = "招标结构化要求主键id")
             Long id) {
-        tenderRequirementsRepository.deleteById(id);
+        // 走 service 而不是直接调仓储：删除需要事务保证主表与子表一致
+        tenderRequirementsService.deleteById(id);
     }
 }

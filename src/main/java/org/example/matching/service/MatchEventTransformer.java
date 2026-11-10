@@ -100,12 +100,13 @@ public class MatchEventTransformer {
                                                 Class<T> type,
                                                 Set<Long> seen) {
         return Flux.defer(() -> {
-            final StringBuilder buffer = new StringBuilder();
+            // 用增量 Reader 而不是 StringBuilder：每个 delta 只扫描新增片段，长输出下避免 O(n²)
+            final JsonStreamExtractor.Reader reader = new JsonStreamExtractor.Reader();
             return events
                     .concatMap(event -> {
                         if (event instanceof TextBlockDeltaEvent delta) {
-                            buffer.append(delta.getDelta());
-                            return extract(buffer, module, type, seen);
+                            reader.append(delta.getDelta());
+                            return extract(reader, module, type, seen);
                         }
                         return Flux.empty();
                     })
@@ -116,13 +117,13 @@ public class MatchEventTransformer {
         });
     }
 
-    private <T> Flux<MatchEvent<?>> extract(StringBuilder buffer,
+    private <T> Flux<MatchEvent<?>> extract(JsonStreamExtractor.Reader reader,
                                             MatchModule module,
                                             Class<T> type,
                                             Set<Long> seen) {
         List<MatchEvent<?>> results = new ArrayList<>();
         String json;
-        while ((json = JsonStreamExtractor.takeFirstCompleteJson(buffer)) != null) {
+        while ((json = reader.poll()) != null) {
             try {
                 JsonNode node = mapper.readTree(json);
                 if (!isMatchResult(node, module)) {
