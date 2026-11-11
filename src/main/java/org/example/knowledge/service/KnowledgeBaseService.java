@@ -164,7 +164,9 @@ public class KnowledgeBaseService {
         KnowledgeBase kb = new KnowledgeBase();
         kb.setName(name);
         kb.setDocumentCount(0L);
-        kb.setEmbeddingEnabled(embeddingClient.isEnabled());
+        // 这里记录“是否配置了向量化”，而不是“当前是否可用”：
+        // embeddingClient.isEnabled() 在故障冷却期内会返回 false，不应把知识库永久标记为未启用
+        kb.setEmbeddingEnabled(StringUtils.hasText(properties.getEmbedding().getProvider()));
         kb.setEmbeddingDimension(properties.getEmbedding().getDimension());
         kb.setEmbeddingModel(properties.getEmbedding().getProvider());
         kb.setCreatedAt(now);

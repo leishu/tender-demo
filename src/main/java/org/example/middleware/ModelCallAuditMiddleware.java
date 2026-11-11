@@ -1,29 +1,27 @@
 package org.example.middleware;
 
-import tools.jackson.core.util.DefaultIndenter;
-import tools.jackson.core.util.DefaultPrettyPrinter;
-import tools.jackson.core.util.Separators;
-import tools.jackson.databind.json.JsonMapper;
-import tools.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import io.agentscope.core.agent.Agent;
 import io.agentscope.core.agent.RuntimeContext;
-import io.agentscope.core.event.*;
-import io.agentscope.core.message.ContentBlock;
+import io.agentscope.core.event.AgentEvent;
+import io.agentscope.core.event.ModelCallEndEvent;
+import io.agentscope.core.event.ModelCallStartEvent;
 import io.agentscope.core.message.Msg;
-import io.agentscope.core.message.MsgRole;
-import io.agentscope.core.message.TextBlock;
-import io.agentscope.core.message.ToolResultBlock;
 import io.agentscope.core.middleware.MiddlewareBase;
 import io.agentscope.core.middleware.ModelCallInput;
+import io.agentscope.core.model.ChatUsage;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
-import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
-import org.example.util.Texts;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.SignalType;
+import tools.jackson.core.util.DefaultIndenter;
+import tools.jackson.core.util.DefaultPrettyPrinter;
+import tools.jackson.core.util.Separators;
+import tools.jackson.databind.SerializationFeature;
+import tools.jackson.databind.json.JsonMapper;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -35,9 +33,12 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
-import java.util.*;
+import java.util.Comparator;
+import java.util.List;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
@@ -51,11 +52,16 @@ import java.util.stream.Stream;
  * <ul>
  *   <li><b>不丢记录</b>：完成、异常、取消都会落盘（原先只看 {@code doOnComplete}，
  *       出错的调用恰好没有记录）；</li>
- *   <li><b>不阻塞事件线程</b>：序列化与写文件都在单线程执行器里完成；</li>
+ *   <li><b>不阻塞事件线程</b>：事件线程只做快照，序列化与写文件都在单线程执行器里完成；</li>
  *   <li><b>不覆盖</b>：文件名带全局自增序号，且以 {@code CREATE_NEW} 写入；</li>
  *   <li><b>不无限膨胀</b>：启动时与每写入若干条后按“保留天数 + 最大文件数”清理旧文件，
  *       单条记录的超长文本也会按上限截断。</li>
  * </ul>
+ *
+ * <p>内容字段（prompt / thinkingText / responseText / toolCalls）与 Langfuse 中间件共用
+ * {@link ModelCallContentCollector} / {@link ModelCallContent}，因此两边对同一次调用给出
+ * 的字段结构与截断结果一致。隐私场景可用 {@code llm.audit.capture-content=false} 关闭正文，
+ * 只保留模型名、token、耗时与状态。</p>
  */
 @Component
 @Slf4j
@@ -72,12 +78,22 @@ public class ModelCallAuditMiddleware implements MiddlewareBase {
     @Value("${llm.audit.max-files:5000}")
     private int maxFiles;
 
-    /** 单条记录中思考/回复文本的最大字符数，避免单个文件过大 */
-    @Value("${llm.audit.max-content-chars:20000}")
+    /**
+     * 单条记录中思考/回复文本的最大字符数，避免单个文件过大。
+     * 小于等于 0 视为未配置，退回 {@link ModelCallContent#DEFAULT_MAX_TEXT_CHARS}。
+     */
+    @Value("${llm.audit.max-content-chars:50000}")
     private int maxContentChars;
+
+    /** 是否记录提示词、思考过程、回复与工具调用；关闭后只留元数据 */
+    @Value("${llm.audit.capture-content:true}")
+    private boolean captureContent;
 
     /** 每写入多少条触发一次旧文件清理 */
     private static final int PRUNE_EVERY_WRITES = 200;
+
+    /** 写盘任务队列容量；磁盘慢或调用密集时避免无限堆积 */
+    private static final int WRITE_QUEUE_CAPACITY = 1_000;
 
     /**
      * 线程安全的 ObjectMapper，应用启动时配置一次即可复用
@@ -105,12 +121,21 @@ public class ModelCallAuditMiddleware implements MiddlewareBase {
     /** 已写入条数，用于控制清理频率 */
     private final AtomicLong writeCount = new AtomicLong();
 
-    /** 单线程写盘：保证顺序、避免并发写同一目录，也不占用 Reactor 事件线程 */
-    private final ExecutorService writer = Executors.newSingleThreadExecutor(runnable -> {
-        Thread thread = new Thread(runnable, "model-call-audit-writer");
-        thread.setDaemon(true);
-        return thread;
-    });
+    /**
+     * 单线程写盘：保证顺序、避免并发写同一目录，也不占用 Reactor 事件线程。
+     * 使用有界队列，队列满时丢弃并告警，宁可少一条审计也不能拖垮模型调用。
+     */
+    private final ExecutorService writer = new ThreadPoolExecutor(
+            1, 1, 0L, TimeUnit.MILLISECONDS,
+            new ArrayBlockingQueue<>(WRITE_QUEUE_CAPACITY),
+            runnable -> {
+                Thread thread = new Thread(runnable, "model-call-audit-writer");
+                thread.setDaemon(true);
+                return thread;
+            },
+            (runnable, executor) -> log.warn(
+                    "模型调用审计写入任务被拒绝（队列容量 {}，或写入线程已关闭），丢弃一条记录",
+                    WRITE_QUEUE_CAPACITY));
 
     @PostConstruct
     protected void init() {
@@ -142,43 +167,48 @@ public class ModelCallAuditMiddleware implements MiddlewareBase {
             RuntimeContext ctx,
             ModelCallInput input,
             Function<ModelCallInput, Flux<AgentEvent>> next) {
+        // 每次订阅一份独立状态：同一个 Flux 被重放/重试时，两次记录不会互相污染
+        return Flux.defer(() -> {
+            Instant startTime = Instant.now();
+            ModelCallContentCollector collector = new ModelCallContentCollector(maxContentChars);
+            AtomicReference<ChatUsage> usage = new AtomicReference<>();
+            AtomicReference<String> replyId = new AtomicReference<>();
+            // 异常信息：doFinally 拿不到异常对象，先在这里捕获
+            AtomicReference<String> errorMessage = new AtomicReference<>();
 
-        Instant startTime = Instant.now();
-
-        // 用于在 flatMap 中捕获、在收尾时读取的线程安全容器
-        AtomicLong inputTokens = new AtomicLong(0);
-        AtomicLong outputTokens = new AtomicLong(0);
-
-        // 用于累积响应文本，需在 flatMap 之前声明
-        StringBuilder responseText = new StringBuilder();
-        StringBuilder thinkingText = new StringBuilder();
-
-        // 异常信息：doFinally 拿不到异常对象，先在这里捕获
-        AtomicReference<String> errorMessage = new AtomicReference<>();
-
-        return next.apply(input)
-                .flatMap(event -> {
-                    if (event instanceof ModelCallEndEvent endEvent) {
-                        inputTokens.set(endEvent.getUsage().getInputTokens());
-                        outputTokens.set(endEvent.getUsage().getOutputTokens());
-                    } else if (event instanceof TextBlockDeltaEvent deltaEvent) {
-                        String delta = deltaEvent.getDelta();
-                        if (delta != null) {
-                            responseText.append(delta);
+            return next.apply(input)
+                    .doOnNext(event -> {
+                        if (event instanceof ModelCallStartEvent start) {
+                            if (start.getReplyId() != null) {
+                                replyId.set(start.getReplyId());
+                            }
+                        } else if (event instanceof ModelCallEndEvent end) {
+                            if (end.getReplyId() != null) {
+                                replyId.set(end.getReplyId());
+                            }
+                            // 模型未返回 usage 时该字段可能为 null，必须判空，
+                            // 否则一次正常调用会在这里抛 NPE
+                            if (end.getUsage() != null) {
+                                usage.set(end.getUsage());
+                            }
                         }
-                    } else if (event instanceof ThinkingBlockDeltaEvent thinkingEvent) {
-                        String delta = thinkingEvent.getDelta();
-                        if (delta != null) {
-                            thinkingText.append(delta);
+                        if (captureContent) {
+                            collector.onEvent(event);
                         }
-                    }
-                    return Flux.just(event);
-                })
-                .doOnError(error -> errorMessage.set(describe(error)))
-                // doFinally 覆盖 ON_COMPLETE / ON_ERROR / ON_CANCEL 三种收尾，
-                // 异常与客户端断开也会留下记录
-                .doFinally(signal -> persist(startTime, input, thinkingText, responseText,
-                        inputTokens.get(), outputTokens.get(), statusOf(signal), errorMessage.get()));
+                    })
+                    .doOnError(error -> errorMessage.set(describe(error)))
+                    // doFinally 覆盖 ON_COMPLETE / ON_ERROR / ON_CANCEL 三种收尾，
+                    // 异常与客户端断开也会留下记录
+                    .doFinally(signal -> persist(
+                            startTime,
+                            ctx,
+                            input,
+                            collector,
+                            usage.get(),
+                            replyId.get(),
+                            statusOf(signal),
+                            errorMessage.get()));
+        });
     }
 
     private static String statusOf(SignalType signal) {
@@ -200,98 +230,71 @@ public class ModelCallAuditMiddleware implements MiddlewareBase {
         }
         String message = error.getMessage();
         String text = error.getClass().getSimpleName() + (message == null ? "" : ": " + message);
-        return Texts.truncate(text, 2_000);
+        return ModelCallContent.truncateText(text, 2_000);
     }
 
     /**
-     * 在事件线程上只做数据整理，真正的序列化与写盘交给后台单线程执行。
+     * 事件线程只做快照：记录引用与耗时，序列化、截断与写盘都交给后台单线程，
+     * 避免在模型调用链路上做大数据量的 JSON 处理。
      */
     private void persist(Instant startTime,
+                         RuntimeContext ctx,
                          ModelCallInput input,
-                         StringBuilder thinkingText,
-                         StringBuilder responseText,
-                         long inputTokens,
-                         long outputTokens,
+                         ModelCallContentCollector collector,
+                         ChatUsage usage,
+                         String replyId,
                          String status,
                          String error) {
-        ZonedDateTime east8Time = startTime.atZone(ZONE_EAST8);
-        long durationMs = Instant.now().toEpochMilli() - startTime.toEpochMilli();
-        String modelName = input.model() != null ? input.model().getModelName() : "unknown";
-
-        AuditLog record = new AuditLog(
-                east8Time,
-                modelName,
-                inputMsg(input),
-                truncate(thinkingText.toString()),
-                truncate(responseText.toString()),
-                inputTokens,
-                outputTokens,
-                durationMs,
+        AuditSnapshot snapshot = new AuditSnapshot(
+                startTime,
+                ctx != null ? ctx.getSessionId() : null,
+                ctx != null ? ctx.getUserId() : null,
+                replyId,
+                input,
+                collector,
+                usage,
+                Instant.now().toEpochMilli() - startTime.toEpochMilli(),
                 status,
                 error);
-
-        writer.execute(() -> write(record));
+        try {
+            writer.execute(() -> write(buildRecord(snapshot)));
+        } catch (RejectedExecutionException e) {
+            // 应用关闭或队列拒绝：审计失败不能影响已经结束的模型调用
+            log.warn("模型调用审计任务被拒绝，丢弃一条记录: {}", e.getMessage());
+        }
     }
 
-    private String truncate(String content) {
-        if (content == null || content.isEmpty()) {
-            return content;
-        }
-        if (maxContentChars <= 0 || Texts.codePointLength(content) <= maxContentChars) {
-            return content;
-        }
-        return Texts.truncate(content, maxContentChars) + "\n…（已截断，原始长度 "
-                + Texts.codePointLength(content) + " 字符）";
-    }
-
-    private List<PromptMessage> inputMsg(ModelCallInput input) {
+    /** 在写盘线程构建记录：提示词、思考过程、回复与工具调用都在这里序列化。 */
+    private AuditLog buildRecord(AuditSnapshot snapshot) {
+        ModelCallInput input = snapshot.input();
         List<Msg> messages = input.messages();
-        List<PromptMessage> promptMessages = new ArrayList<>();
+        ModelCallContentCollector collector = snapshot.collector();
+        ChatUsage usage = snapshot.usage();
 
-        if (messages != null) {
-            for (Msg msg : messages) {
-                MsgRole role = msg.getRole();
-                String roleStr = (role != null) ? role.name() : "UNKNOWN";
+        List<ModelCallContent.Message> prompt =
+                captureContent ? ModelCallContent.messages(messages, maxContentChars) : null;
+        String thinkingText = captureContent && collector.hasThinkingText()
+                ? collector.thinkingText()
+                : null;
+        String responseText = captureContent ? collector.responseText() : null;
+        List<ModelCallContent.ToolCall> toolCalls =
+                captureContent && collector.hasToolCalls() ? collector.toolCalls() : null;
 
-                if (Objects.equals(role, MsgRole.TOOL)) {
-                    promptMessages.add(buildToolMessage(roleStr, msg));
-                } else {
-                    promptMessages.add(new PromptMessage(roleStr, textOf(msg.getContent())));
-                }
-            }
-        }
-
-        return promptMessages;
-    }
-
-    /** 工具结果消息：记录工具名，并把各 ToolResultBlock 中的文本块按块收集为数组。 */
-    private ToolPromptMessage buildToolMessage(String role, Msg msg) {
-        List<String> contents = new ArrayList<>();
-        AtomicReference<String> toolNameRef = new AtomicReference<>();
-
-        for (ContentBlock block : msg.getContent()) {
-            if (block instanceof ToolResultBlock result) {
-                toolNameRef.set(result.getName());
-                contents.addAll(textOf(result.getOutput()));
-            }
-        }
-
-        return new ToolPromptMessage(role, toolNameRef.get(), contents);
-    }
-
-    /**
-     * 提取内容块中的文本：每个 TextBlock 单独保留为数组中的一个元素，
-     * 便于在审计日志中回溯原始分块结构，而不是被拼接成一段长文本。
-     */
-    private static List<String> textOf(List<ContentBlock> blocks) {
-        if (blocks == null) {
-            return List.of();
-        }
-        return blocks.stream()
-                .filter(TextBlock.class::isInstance)
-                .map(block -> ((TextBlock) block).getText())
-                .filter(text -> !text.isBlank())
-                .toList();
+        return new AuditLog(
+                snapshot.startTime().atZone(ZONE_EAST8),
+                snapshot.sessionId(),
+                snapshot.userId(),
+                snapshot.replyId(),
+                input.model() != null ? input.model().getModelName() : "unknown",
+                prompt,
+                thinkingText,
+                responseText,
+                toolCalls,
+                usage != null ? usage.getInputTokens() : 0,
+                usage != null ? usage.getOutputTokens() : 0,
+                snapshot.durationMs(),
+                snapshot.status(),
+                snapshot.error());
     }
 
     /** 真正写盘的逻辑，运行在 audit-writer 线程。 */
@@ -357,45 +360,39 @@ public class ModelCallAuditMiddleware implements MiddlewareBase {
         }
     }
 
-    /**
-     * 单条提示消息，对应 JSON 数组中的一个对象；
-     * {@code content} 为文本块数组，一个 TextBlock 对应一个元素。
-     */
-    @Getter
-    private static class PromptMessage {
-        final String role;
-        final List<String> content;
-
-        public PromptMessage(String role, List<String> content) {
-            this.role = role;
-            this.content = content;
-        }
-    }
-
-    @Getter
-    private static class ToolPromptMessage extends PromptMessage {
-        final String toolName;
-
-        public ToolPromptMessage(String role, String toolName, List<String> content) {
-            super(role, content);
-            this.toolName = toolName;
-        }
+    /** 事件线程到写盘线程的不可变快照；collector 在流终止后不再被修改 */
+    private record AuditSnapshot(
+            Instant startTime,
+            String sessionId,
+            String userId,
+            String replyId,
+            ModelCallInput input,
+            ModelCallContentCollector collector,
+            ChatUsage usage,
+            long durationMs,
+            String status,
+            String error) {
     }
 
     /**
-     * 审计日志记录结构，字段名与 JSON 输出一一对应
+     * 审计日志记录结构，字段名与 JSON 输出一一对应。
+     * 内容字段在 {@code capture-content=false} 时为 null，序列化时直接省略。
      */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
     private record AuditLog(
             ZonedDateTime timestamp,
+            String sessionId,
+            String userId,
+            String replyId,
             String model,
-            List<PromptMessage> prompt,
+            List<ModelCallContent.Message> prompt,
             String thinkingText,
             String responseText,
+            List<ModelCallContent.ToolCall> toolCalls,
             long inputTokens,
             long outputTokens,
             long durationMs,
             String status,
             String error) {
-
     }
 }

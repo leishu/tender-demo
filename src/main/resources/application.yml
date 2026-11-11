@@ -17,6 +17,14 @@ spring:
 
 llm:
   log-path: ./logs/llm
+  # 模型调用审计（每次调用落一个 JSON 文件）
+  audit:
+    # 是否记录提示词、思考过程、回复与工具调用；false 时只保留模型名、token、耗时与状态
+    capture-content: ${LLM_AUDIT_CAPTURE_CONTENT:true}
+    # 单条文本字段的最大字符数；小于等于 0 时退回默认值 50000
+    max-content-chars: ${LLM_AUDIT_MAX_CONTENT_CHARS:50000}
+    retain-days: ${LLM_AUDIT_RETAIN_DAYS:30}
+    max-files: ${LLM_AUDIT_MAX_FILES:5000}
 
 
 
