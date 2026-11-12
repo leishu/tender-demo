@@ -40,7 +40,7 @@ VITE_API_BASE_URL=http://localhost:8080
 | 路由              | 页面           | 对接接口                                                                        |
 | ----------------- | -------------- | ------------------------------------------------------------------------------- |
 | `/parse`          | 招标解析       | `POST /tender/parse`（建任务）、`GET /tender/tasks/{id}/events`（SSE 续传）、`POST /tender/parse/confirm` |
-| `/match`          | 人员与资质匹配 | `POST /tender/match`（SSE）                                                     |
+| `/match`          | 人员与资质匹配 | `POST /tender/match`（建任务）、`GET /tender/tasks/{id}/events`（SSE 续传）      |
 | `/catalog`        | 投标目录       | `POST /tender/catalog`、`/catalog/adjust`、`GET /catalog`、`POST /catalog/save` |
 | `/chapter`        | 章节撰写       | `POST /tender/chapter`                                                          |
 | `/knowledge-base` | 知识库         | `POST /knowledge/{name}`、`GET /knowledge/search`                               |
@@ -50,8 +50,10 @@ VITE_API_BASE_URL=http://localhost:8080
 `tenderRequirementId` → 跳转目录页。工作流 ID、解析结果、目录结果与 `taskId` 会写入
 `sessionStorage`，刷新后按 `taskId` 回到事件流续看（服务端先回放已落库事件），不会重新解析。
 
-匹配页读取已确认入库的 `tenderRequirementId`，并发消费人员与资质两路 SSE；
-结果按 `requirementId` 归并，支持按“只看未满足”筛选，单路失败不影响另一路。
+匹配页读取已确认入库的 `tenderRequirementId`，同样先 `POST /tender/match` 建任务再订阅
+`GET /tender/tasks/{taskId}/events`，并发消费人员与资质两路事件；结果按 `requirementId` 归并，
+支持按“只看未满足”筛选，单路失败（`error` 事件）不影响另一路。任务号写入 `sessionStorage`，
+刷新后自动 `resume` 回放已匹配的条目，不重新调用模型。
 
 ## 目录结构
 
@@ -106,23 +108,28 @@ pnpm api:generate   # 从后端 OpenAPI 重新生成类型
 
 ## 实现约定
 
-- **解析是“建任务 + 订阅事件”**：`POST /tender/parse` 只返回 `taskId`，事件由
-  `GET /tender/tasks/{id}/events` 推送。每条事件带递增 `id`，前端记住最后一条；
+- **解析与匹配都是“建任务 + 订阅事件”**：`POST /tender/parse`、`POST /tender/match` 只返回
+  `taskId`，事件由 `GET /tender/tasks/{id}/events` 推送。每条事件带递增 `id`，前端记住最后一条；
   连接断开时带 `lastEventId` 退避重连（最多 3 次），服务端只补发缺失的一段。
-  重连用尽后查一次 `GET /tender/tasks/{id}`，任务仍在执行就提示稍后刷新，而不是误报解析失败。
-- **SSE 用 GET + fetch-event-source**：解析事件流是幂等的 GET，浏览器/网关断开后可以安全重连；
-  `useSse.ts` 自身不自动重连，重连策略（次数、退避、游标）由 `useTenderParse` 控制。
-  匹配流仍是 `POST /tender/match`。
+  服务端在任务收尾后会主动关闭流，这时先查一次 `GET /tender/tasks/{id}`：已到终态直接按终态收尾，
+  不再做无谓的重连；仍在执行才退避重连。重连用尽后同样查状态，任务仍在执行就提示稍后刷新，而不是误报失败。
+- **SSE 用 GET + fetch-event-source**：事件流是幂等的 GET，浏览器/网关断开后可以安全重连；
+  `useSse.ts` 自身不自动重连，重连策略（次数、退避、游标）由 `useTenderParse` / `useTenderMatch` 控制。
 - **事件按 `module` 分派**：`project` / `qualification` / `performance` /
   `personnel` / `scoringItem` / `error` / `completed`，其中 `completed` 是结束信号，
   `error` 是 HTTP 200 下的业务错误。匹配流同理，`personnel` 与 `qualification`
-  两路事件交错到达，按 `requirementId` 覆盖归并。
+  两路事件交错到达，按 `requirementId` 覆盖归并；匹配流里的 `error` 只代表某一路失败，
+  不是终止信号，仍以 `completed` 或任务状态为准。
 - **长任务可取消**：目录生成、目录调整、章节撰写都可能耗时几十秒，统一走
   `useAsyncTask`，带 180s 超时和 `AbortController`。
-- **Pinia 只放跨页面状态**：当前 `tenderRequirementId`、解析结果、目录结果、解析任务号；
+- **Pinia 只放跨页面状态**：当前 `tenderRequirementId`、解析结果、目录结果、解析/匹配任务号；
   表单草稿、弹窗开关留在组件内。
 - **幂等键只在一次意图内复用**：`utils/idempotency.ts` 生成键，请求失败保留、成功后清空；
   目录/章节重试因此能命中服务端已完成的任务，直接拿缓存结果，不重复调用模型。
+  匹配同理：`matchTaskId` 与未落地的 `matchIdempotencyKey` 一起存在 sessionStorage 里，
+  POST 超时（服务端其实已建任务）后刷新再点，仍是同一个键，不会让两路匹配重跑一遍；
+  拿到 taskId 后键即作废，用户点“重新匹配”才是新的一次。
+  连接断开但任务可能仍在跑时按钮变成“继续查看”，续看原任务而不是新建任务。
 - **保存是覆盖语义**：同一招标要求只保留一份目录，UI 已提示“保存会覆盖旧目录”。
 
 ## 后续可补

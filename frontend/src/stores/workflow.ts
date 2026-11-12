@@ -12,6 +12,16 @@ interface PersistedState {
   catalogRunId: number | null
   /** 最近一次解析任务ID：刷新页面后据此回到事件流续看，不必重新解析 */
   parseTaskId: number | null
+  /** 最近一次匹配任务ID：刷新页面后据此回到事件流续看，不必重新匹配 */
+  matchTaskId: number | null
+  /**
+   * 尚未落成任务号的匹配幂等键。
+   *
+   * 匹配一次要跑两路模型，比解析贵：POST 超时（服务端其实已建任务）时再点一次，
+   * 必须复用同一个键才能拿回原任务，而不是让两路匹配再跑一遍。
+   * 一旦拿到 taskId，意图已经落地，这个键就作废（重新匹配要用新键）。
+   */
+  matchIdempotencyKey: string | null
 }
 
 function emptyState(): PersistedState {
@@ -21,6 +31,8 @@ function emptyState(): PersistedState {
     catalogResult: null,
     catalogRunId: null,
     parseTaskId: null,
+    matchTaskId: null,
+    matchIdempotencyKey: null,
   }
 }
 
@@ -63,12 +75,19 @@ export const useWorkflowStore = defineStore('workflow', () => {
   const catalogResult = ref<CatalogResult | null>(initial.catalogResult)
   const catalogRunId = ref<number | null>(initial.catalogRunId)
   const parseTaskId = ref<number | null>(initial.parseTaskId)
+  const matchTaskId = ref<number | null>(initial.matchTaskId)
+  const matchIdempotencyKey = ref<string | null>(initial.matchIdempotencyKey)
   const sessionKey = ref(0)
 
   const hasRequirement = computed(() => tenderRequirementId.value !== null)
   const hasCatalog = computed(() => catalogResult.value !== null)
 
   function setTenderRequirementId(id: number | null) {
+    // 匹配结果只对所属招标要求有效，切换文件后不应再回放上一份的匹配任务
+    if (tenderRequirementId.value !== id) {
+      matchTaskId.value = null
+      matchIdempotencyKey.value = null
+    }
     tenderRequirementId.value = id
   }
 
@@ -88,12 +107,22 @@ export const useWorkflowStore = defineStore('workflow', () => {
     parseTaskId.value = id
   }
 
+  function setMatchTaskId(id: number | null) {
+    matchTaskId.value = id
+  }
+
+  function setMatchIdempotencyKey(key: string | null) {
+    matchIdempotencyKey.value = key
+  }
+
   function clearParsed() {
     tenderRequirementId.value = null
     requirements.value = null
     catalogResult.value = null
     catalogRunId.value = null
     parseTaskId.value = null
+    matchTaskId.value = null
+    matchIdempotencyKey.value = null
   }
 
   function reset() {
@@ -107,7 +136,15 @@ export const useWorkflowStore = defineStore('workflow', () => {
   }
 
   watch(
-    [tenderRequirementId, requirements, catalogResult, catalogRunId, parseTaskId],
+    [
+      tenderRequirementId,
+      requirements,
+      catalogResult,
+      catalogRunId,
+      parseTaskId,
+      matchTaskId,
+      matchIdempotencyKey,
+    ],
     () => {
       const state: PersistedState = {
         tenderRequirementId: tenderRequirementId.value,
@@ -115,6 +152,8 @@ export const useWorkflowStore = defineStore('workflow', () => {
         catalogResult: catalogResult.value,
         catalogRunId: catalogRunId.value,
         parseTaskId: parseTaskId.value,
+        matchTaskId: matchTaskId.value,
+        matchIdempotencyKey: matchIdempotencyKey.value,
       }
       try {
         sessionStorage.setItem(STORAGE_KEY, JSON.stringify(state))
@@ -132,6 +171,8 @@ export const useWorkflowStore = defineStore('workflow', () => {
     catalogResult,
     catalogRunId,
     parseTaskId,
+    matchTaskId,
+    matchIdempotencyKey,
     sessionKey,
     hasRequirement,
     hasCatalog,
@@ -140,6 +181,8 @@ export const useWorkflowStore = defineStore('workflow', () => {
     setCatalogResult,
     setCatalogRunId,
     setParseTaskId,
+    setMatchTaskId,
+    setMatchIdempotencyKey,
     clearParsed,
     reset,
   }

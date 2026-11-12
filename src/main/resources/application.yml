@@ -75,7 +75,8 @@ tender:
       stale-minutes: ${TENDER_TASK_STALE_MINUTES:10}
       # 陈旧任务扫描间隔（毫秒）
       scan-interval-ms: ${TENDER_TASK_RECOVERY_SCAN_INTERVAL_MS:60000}
-    # 同步任务（目录/章节）执行期间的心跳间隔（毫秒）；<=0 关闭
+    # 执行中任务的心跳间隔（毫秒）；<=0 关闭。同步任务（目录/章节）与流式任务
+    # （解析/匹配，长时间没有事件时）都会按该间隔刷新 updated_at
     heartbeat-ms: ${TENDER_TASK_HEARTBEAT_MS:30000}
 
 

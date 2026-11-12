@@ -95,10 +95,12 @@ public class TenderController {
                 .subscribeOn(Schedulers.boundedElastic());
     }
 
-    @Operation(summary = "订阅解析任务事件（SSE，可断线续传）",
+    @Operation(summary = "订阅任务事件（SSE，可断线续传）",
             description = """
                     先回放已落库的事件，再订阅实时事件；连接断开后带上已收到的最后一条 `id` 重连即可续上，
-                    不会重复、不会遗漏，也不会重新解析。
+                    不会重复、不会遗漏，也不会重新调用模型。
+
+                    解析任务（`type=parse`）与匹配任务（`type=match`）共用本接口，区别只在事件的 `module`。
 
                     ### 续传游标
                     - 请求头 `Last-Event-ID`（浏览器原生 EventSource 自动携带）
@@ -112,7 +114,7 @@ public class TenderController {
                     - 任务结束时会推送 `completed`（成功）或 `error`（失败/取消）后关闭连接；
                       若任务已结束，回放完历史事件即关闭。
 
-                    ### data 结构（按 module 分派）
+                    ### data 结构（解析任务，按 module 分派）
                     | module | 说明 | data 关键字段 |
                     |--------|------|--------------|
                     | `project` | 招标总体要求 | projectName、location、duration、budget |
@@ -120,8 +122,15 @@ public class TenderController {
                     | `performance` | 业绩要求 | projectType、quantity、amount、timeRange、source |
                     | `personnel` | 关键人员要求 | role、quantity、certificate、source |
                     | `scoringItem` | 评分点 | name、score、criterion、suggestedChapter、source |
-                    | `error` | 解析失败/取消（无 data，请看 message） | message |
-                    | `completed` | 结束信号（无 data） | - |
+
+                    ### data 结构（匹配任务）
+                    | module | 说明 | data |
+                    |--------|------|------|
+                    | `personnel` | 人员匹配结果 | `PersonnelMatchResult` |
+                    | `qualification` | 企业资质匹配结果 | `QualificationMatchResult` |
+
+                    两类任务的终止事件都是 `error`（失败/取消）与 `completed`（成功）；
+                    匹配任务中间的 `error` 事件表示某一路失败或缺条，**不是终止信号**，另一路仍会继续。
 
                     ### 失败说明
                     任务不存在时同样返回 200 + 一条 `error` 事件，避免 SSE 响应头已提交后无法改状态码。
@@ -161,12 +170,12 @@ public class TenderController {
 
     @Operation(summary = "取消任务",
             description = """
-                    取消仍在执行的解析任务：断开上游以停止继续消耗模型 token，补充一条 `error` 事件
-                    （message 为“解析已取消”）并把状态置为 `cancelled`。
+                    取消仍在执行的解析或匹配任务：断开上游以停止继续消耗模型 token，补充一条 `error` 事件
+                    （message 为“解析已取消”/“匹配已取消”）并把状态置为 `cancelled`。
 
                     ### 响应说明
                     - 204 No Content：已受理；任务已处于终态时同样返回 204（幂等）。
-                    - 任务不存在返回 404 Not Found。
+                    - 任务不存在返回 404 Not Found；目录/章节这类同步任务不支持取消，返回 409。
                     """)
     @PostMapping("/tasks/{taskId}/cancel")
     @ResponseStatus(HttpStatus.NO_CONTENT)

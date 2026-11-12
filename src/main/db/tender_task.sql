@@ -22,7 +22,7 @@
 
 CREATE TABLE IF NOT EXISTS `t_tender_task` (
     `id`              BIGINT        NOT NULL AUTO_INCREMENT COMMENT '主键ID，同时作为对外 taskId',
-    `task_type`       VARCHAR(32)   NOT NULL                COMMENT '任务类型：parse/catalog/catalog_adjust/chapter',
+    `task_type`       VARCHAR(32)   NOT NULL                COMMENT '任务类型：parse/match/catalog/catalog_adjust/chapter',
     `status`          VARCHAR(16)   NOT NULL                COMMENT '任务状态：pending/running/succeeded/failed/cancelled',
     `user_id`         VARCHAR(128)  NOT NULL DEFAULT '__anon__' COMMENT '用户ID，匿名固定为 __anon__',
     `idempotency_key` VARCHAR(191)  NULL                    COMMENT '幂等键；同一键重复提交返回同一任务',

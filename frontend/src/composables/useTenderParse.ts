@@ -1,5 +1,11 @@
 import { computed, onScopeDispose, ref, shallowRef } from 'vue'
-import type { ParseLogEntry, ParseModule, TenderParseEvent, TenderRequirements } from '@/api/types'
+import type {
+  ParseLogEntry,
+  ParseModule,
+  TenderParseEvent,
+  TenderRequirements,
+  TenderTaskView,
+} from '@/api/types'
 import { tenderApi } from '@/api/tender'
 import { streamSse } from './useSse'
 import { applyParseEvent, createEmptyRequirements } from '@/features/parse/parseReducer'
@@ -172,6 +178,7 @@ export function useTenderParse() {
     let attempt = 0
 
     while (true) {
+      let closedCleanly = false
       try {
         await streamSse(tenderApi.taskEventsUrl(id, cursor), {
           method: 'GET',
@@ -187,6 +194,8 @@ export function useTenderParse() {
             }
           },
         })
+        // 服务端在任务收尾后主动关闭流，属于正常结束，不是网络故障
+        closedCleanly = true
       } catch (cause) {
         if (run !== runId || aborted) {
           return
@@ -203,6 +212,19 @@ export function useTenderParse() {
       if (sawCompleted || status.value === 'error' || status.value === 'cancelled') {
         return
       }
+
+      // 流被服务端正常关闭却没收到 completed：说明任务已经收尾（失败/取消），
+      // 先查一次任务状态直接收尾，省掉 3 次无谓的重连等待
+      if (closedCleanly) {
+        const task = await fetchTask(id)
+        if (run !== runId) {
+          return
+        }
+        if (task && finishFromTask(task)) {
+          return
+        }
+      }
+
       if (attempt >= MAX_RECONNECT) {
         await settleAfterDisconnect(id, run)
         return
@@ -217,39 +239,50 @@ export function useTenderParse() {
     }
   }
 
+  /** 查询任务状态；失败返回 null，表示“无法判断”，由调用方按断线处理 */
+  async function fetchTask(id: number): Promise<TenderTaskView | null> {
+    try {
+      return await tenderApi.getTask(id)
+    } catch {
+      return null
+    }
+  }
+
+  /** 任务已到终态就按终态收尾，返回 true 表示不需要再等事件 */
+  function finishFromTask(task: TenderTaskView): boolean {
+    if (task.status === 'succeeded') {
+      sawCompleted = true
+      finish('done')
+      return true
+    }
+    if (task.status === 'cancelled') {
+      finish('cancelled')
+      return true
+    }
+    if (task.status === 'failed') {
+      errorMessage.value = task.errorMessage ?? '解析失败'
+      finish('error')
+      return true
+    }
+    return false
+  }
+
   /**
    * 事件流彻底断开后的兜底：用任务状态代替“连接关闭”做判断。
    * 任务还在跑不算失败，只是本次没能续上，提示用户稍后刷新继续看。
    */
   async function settleAfterDisconnect(id: number, run: number) {
-    try {
-      const task = await tenderApi.getTask(id)
-      if (run !== runId) {
-        return
-      }
-      if (task.status === 'succeeded') {
-        sawCompleted = true
-        finish('done')
-        return
-      }
-      if (task.status === 'cancelled') {
-        finish('cancelled')
-        return
-      }
-      if (task.status === 'failed') {
-        errorMessage.value = task.errorMessage ?? '解析失败'
-        finish('error')
-        return
-      }
-      errorMessage.value = '与解析服务的连接已中断，任务仍在服务端执行；稍后刷新本页可继续查看进度'
-      finish('error')
-    } catch (cause) {
-      if (run !== runId) {
-        return
-      }
-      errorMessage.value = `解析连接已中断，且无法确认任务状态：${toErrorMessage(cause)}`
-      finish('error')
+    const task = await fetchTask(id)
+    if (run !== runId) {
+      return
     }
+    if (task && finishFromTask(task)) {
+      return
+    }
+    errorMessage.value = task
+      ? '与解析服务的连接已中断，任务仍在服务端执行；稍后刷新本页可继续查看进度'
+      : '解析连接已中断，且无法确认任务状态，请稍后刷新重试'
+    finish('error')
   }
 
   function handleMessage(raw: string) {

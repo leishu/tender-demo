@@ -2,70 +2,83 @@ package org.example.controller;
 
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
-import org.example.matching.model.dto.MatchEvent;
 import org.example.matching.model.req.MatchRequest;
 import org.example.matching.service.TenderMatchingService;
+import org.example.task.model.TaskType;
+import org.example.task.model.dto.TenderTaskCreated;
+import org.example.task.service.TaskStream;
+import org.example.task.service.TenderTaskService;
 import org.springframework.http.HttpStatus;
-import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
-import org.springframework.web.server.ResponseStatusException;
-import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 
 @Tag(name = "人员与企业资质匹配")
 @RestController
 @RequestMapping("/tender")
 public class MatchingController {
 
+    private final TenderTaskService taskService;
     private final TenderMatchingService matchingService;
 
-    public MatchingController(TenderMatchingService matchingService) {
+    public MatchingController(TenderTaskService taskService, TenderMatchingService matchingService) {
+        this.taskService = taskService;
         this.matchingService = matchingService;
     }
 
-    @Operation(summary = "并发匹配人员与企业资质",
+    @Operation(summary = "创建人员与企业资质匹配任务",
             description = """
-                    根据已入库的招标要求，并发执行人员匹配与企业资质匹配，并以 SSE 流式返回匹配结果。
+                    创建匹配任务并**立即返回** taskId，两路子 Agent 在后台并发执行；匹配进度与结果
+                    通过 `GET /tender/tasks/{taskId}/events` 订阅（与解析共用同一套任务与事件接口）。
 
                     ### 请求体
                     - `userId`：用户ID（可选）
                     - `tenderRequirementId`：已入库的招标要求主键（必填）
 
-                    ### 响应说明
-                    - 采用 `text/event-stream` 协议，客户端按 SSE 逐条消费 `data` 行。
-                    - 每条数据统一为 `{"module":"<模块名>","data":{...}}`。
-                    - 人员匹配与资质匹配并行执行；每匹配完一条要求就立即推送一条结果，两路事件可能交错到达。
-                    - 人员模块 `module=personnel`，data 为 `PersonnelMatchResult`；
-                      资质模块 `module=qualification`，data 为 `QualificationMatchResult`。
-                    - 两路全部结束后推送一条 `{"module":"completed"}`，此后连接关闭。
-                    - 某个子 Agent 失败时推送 `{"module":"error","message":"..."}`，另一路仍会继续；
-                      两路都结束后同样推送 `completed`。
+                    ### 幂等
+                    可携带 `Idempotency-Key` 请求头（建议 UUID）。同一 key 重复提交返回**同一个
+                    taskId**，不会让两路匹配再跑一遍；想重新匹配请换一个新 key。
 
-                    ### 匹配状态
-                    - `MATCHED`：可核验项全部满足（不代表没有待人工复核项，见下）
-                    - `PARTIAL`：部分满足（如证书过期、等级不足、人数不够）
-                    - `UNMATCHED`：没有可用数据
+                    ### 响应
+                    - `taskId`：任务ID，用于订阅事件与查询状态
+                    - `type`：固定为 `match`
+                    - `status`：`pending` / `running` / `succeeded` / `failed` / `cancelled`
+                    - `eventsUrl`：事件订阅地址
 
-                    ### 人工复核标记
-                    - `requiresManualReview=true` 表示该条结论需人工复核，客户端应告警，不能当作确定通过。
-                    - 资质侧：强制资格 `UNMATCHED` 时必为 true，并带 `risk=mandatory_qualification_missing`。
-                    - 人员侧：`unverifiedRequirements` 逐项列出工具无数据、无法核验的招标强制项
-                      （如社保记录月数、是否担任其他在建工程项目经理）；非空时必为 true。
-                    - 待核验项不会把 `status` 从 `MATCHED` 降级，客户端需把状态与复核标记一并展示。
-                    - 标记由应用层强制兜底，不依赖模型自觉输出。
+                    ### 事件说明（data 结构）
+                    | module | 说明 | data |
+                    |--------|------|------|
+                    | `personnel` | 人员匹配结果 | `PersonnelMatchResult` |
+                    | `qualification` | 企业资质匹配结果 | `QualificationMatchResult` |
+                    | `error` | 某一路失败/缺条（**非终止**，另一路继续） | 事件带 message |
+                    | `completed` | 全部结束（成功终止信号） | - |
+
+                    人员与资质两路并行，事件可能交错到达；每匹配完一条要求就落库一条，断线重连带
+                    `Last-Event-ID` 即可续上，不会重复也不会遗漏。
 
                     ### 失败说明
                     - `tenderRequirementId` 为空返回 400 Bad Request。
                     - 招标要求不存在返回 404 Not Found。
+                    - 匹配本身的失败不体现在状态码上，而是通过 event 流中的 `error` 事件 + 任务状态
+                      `failed` 表达。
                     """)
-    @PostMapping(value = "/match", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public Flux<MatchEvent<?>> match(@RequestBody MatchRequest request) {
-        if (request.getTenderRequirementId() == null) {
-            return Flux.error(new ResponseStatusException(
-                    HttpStatus.BAD_REQUEST, "招标要求 tenderRequirementId 不能为空"));
-        }
-        return matchingService.match(request);
+    @PostMapping("/match")
+    @ResponseStatus(HttpStatus.ACCEPTED)
+    public Mono<TenderTaskCreated> match(
+            @RequestBody MatchRequest request,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey) {
+        return Mono.fromCallable(() -> {
+            // 先校验、后查幂等键：参数错误（400/404）始终如实暴露，不会被幂等命中掩盖。
+            // 副作用是“建任务后招标要求被删”时同 key 重试用会拿到 404 而不是原任务——
+            // 窗口极小的边界情况，可以接受。
+            TaskStream stream = matchingService.taskStream(request);
+            return taskService.createStreamingTask(TaskType.MATCH, request.getUserId(),
+                    idempotencyKey, request, stream);
+        }).subscribeOn(Schedulers.boundedElastic());
     }
 }

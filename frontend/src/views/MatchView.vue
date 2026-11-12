@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Close, Loading, VideoPlay, Warning } from '@element-plus/icons-vue'
@@ -17,21 +17,57 @@ const {
   errors,
   personnelResults,
   qualificationResults,
+  taskId,
+  idempotencyKey,
+  taskSettled,
   isRunning,
   receivedCount,
   hasData,
   start,
+  resume,
   cancel,
 } = useTenderMatch()
 
 const activeTab = ref<'personnel' | 'qualification'>('personnel')
 const onlyUnmet = ref(false)
 
+// 任务号落进工作流状态（sessionStorage）：刷新页面后据此回到事件流续看，而不是重新匹配
+watch(taskId, (id) => {
+  workflow.setMatchTaskId(id)
+})
+
+// 未落成任务号的幂等键一起持久化：POST 超时（服务端已建任务）后刷新再点，也不会重跑两路模型
+watch(idempotencyKey, (key) => {
+  workflow.setMatchIdempotencyKey(key)
+})
+
+// 匹配到终态（含失败）后不再需要续看：清掉任务号，避免下次进来又回放一遍。
+// 只有 taskSettled 为真才算“服务端确认结束”——断线但任务仍在跑时要保留任务号，刷新还能接上。
+watch([status, taskSettled], ([value, settled]) => {
+  if (value === 'done' || value === 'cancelled' || (value === 'error' && settled)) {
+    workflow.setMatchTaskId(null)
+  }
+})
+
+/**
+ * 页面刷新/切走回来时续看上一次的匹配任务。
+ * 服务端会先回放已落库的事件再续实时流，不会重新调用模型。
+ */
+onMounted(async () => {
+  // 先接上刷新前未落地的幂等键，再决定是续看任务还是等用户点“开始匹配”
+  idempotencyKey.value = workflow.matchIdempotencyKey
+  const saved = workflow.matchTaskId
+  if (saved) {
+    await resume(saved)
+  }
+})
+
 const statusLabel = computed(() => {
   const labels = {
     idle: '待开始',
     connecting: '连接中',
     streaming: '匹配中',
+    reconnecting: '重连中',
     done: '已完成',
     error: '失败',
     cancelled: '已取消',
@@ -46,22 +82,40 @@ const statusType = computed<'success' | 'warning' | 'info' | 'danger'>(() => {
   if (status.value === 'error') {
     return 'danger'
   }
-  if (status.value === 'streaming') {
+  if (status.value === 'streaming' || status.value === 'reconnecting') {
     return 'warning'
   }
   return 'info'
 })
 
+/**
+ * 连接断了但服务端任务可能还在跑（查不到状态 / 重连用尽）。
+ * 此时点击不该新建任务——那会让两路匹配再跑一遍，续看原任务才对。
+ */
+const canResumeInstead = computed(
+  () => status.value === 'error' && !taskSettled.value && taskId.value != null,
+)
+
+/**
+ * 失败态的统一说明。任务可能仍在执行时不能说“请重试”，
+ * 否则会被理解成要重跑两路模型；进度行、空态、按钮文案都从这里取，避免各说各话。
+ */
+const errorHint = computed(() =>
+  canResumeInstead.value ? '连接已中断，任务可能仍在执行' : '匹配失败，请重试',
+)
+
 const progressText = computed(() => {
   switch (status.value) {
     case 'connecting':
-      return '正在连接匹配服务…'
+      return '正在创建匹配任务…'
+    case 'reconnecting':
+      return `连接中断，正在续传已匹配的结果…（已返回 ${receivedCount.value} 条）`
     case 'streaming':
       return `已返回 ${receivedCount.value} 条结果：人员 ${personnelResults.value.length} 条、资质 ${qualificationResults.value.length} 条`
     case 'done':
       return `匹配结束，共返回 ${receivedCount.value} 条结果`
     case 'error':
-      return errorMessage.value || '匹配失败，请重试'
+      return errorMessage.value || errorHint.value
     case 'cancelled':
       return `已取消，已返回 ${receivedCount.value} 条结果`
     default:
@@ -74,6 +128,18 @@ const qualificationSummary = computed(() => summarize(qualificationResults.value
 
 const manualReview = computed(() =>
   summarizeManualReview(personnelResults.value, qualificationResults.value),
+)
+
+const startLabel = computed(() => {
+  if (canResumeInstead.value) {
+    return '继续查看'
+  }
+  return hasData.value ? '重新匹配' : '开始匹配'
+})
+
+/** 空态文案必须和按钮一致：能续看时不能说“请重试”，否则会被理解成要重跑两路模型 */
+const emptyDescription = computed(() =>
+  status.value !== 'error' ? '还没有匹配结果' : errorHint.value,
 )
 
 /** 人员侧待人工核验项，统一用复核色展示。 */
@@ -156,6 +222,11 @@ async function runMatch() {
     ElMessage.warning('请先完成招标解析并确认入库')
     return
   }
+  // 任务可能还在服务端跑：续看它，而不是再开一次（匹配要跑两路模型，代价最高）
+  if (canResumeInstead.value && taskId.value != null) {
+    await resume(taskId.value)
+    return
+  }
   await start(requirementId, workflow.userId)
   if (status.value === 'done') {
     if (errors.value.length) {
@@ -174,6 +245,7 @@ async function runMatch() {
         <h1>人员与资质匹配</h1>
         <p class="muted">
           基于已确认入库的招标要求，并发匹配企业人员与企业资质；每条要求匹配完成即实时返回，两路结果可能交错到达。
+          刷新或断线后可按任务继续查看已匹配的结果，不会重新调用模型。
         </p>
       </div>
       <el-tag v-if="workflow.tenderRequirementId" type="success" effect="plain">
@@ -194,6 +266,7 @@ async function runMatch() {
           <div class="card-header">
             <span>匹配任务 · 招标要求 #{{ workflow.tenderRequirementId }}</span>
             <div class="header-actions">
+              <el-tag v-if="taskId" type="info" effect="plain" size="small">任务 #{{ taskId }}</el-tag>
               <el-tag :type="statusType" effect="plain">{{ statusLabel }}</el-tag>
               <el-button v-if="isRunning" :icon="Close" @click="cancel">取消匹配</el-button>
               <el-button
@@ -203,7 +276,7 @@ async function runMatch() {
                 :disabled="isRunning"
                 @click="runMatch"
               >
-                {{ hasData ? '重新匹配' : '开始匹配' }}
+                {{ startLabel }}
               </el-button>
             </div>
           </div>
@@ -277,8 +350,8 @@ async function runMatch() {
       </div>
 
       <el-card v-if="!hasData && !isRunning" shadow="never" class="panel">
-        <el-empty :description="status === 'error' ? '匹配失败，请重试' : '还没有匹配结果'">
-          <el-button type="primary" :icon="VideoPlay" @click="runMatch">开始匹配</el-button>
+        <el-empty :description="emptyDescription">
+          <el-button type="primary" :icon="VideoPlay" @click="runMatch">{{ startLabel }}</el-button>
         </el-empty>
       </el-card>
 

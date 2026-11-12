@@ -19,6 +19,8 @@ import org.example.parsing.model.QualificationRequirement;
 import org.example.parsing.model.TenderRequirements;
 import org.example.parsing.repo.TenderRequirementsRepository;
 import org.example.service.RuntimeContextBuilder;
+import org.example.task.service.TaskStream;
+import org.example.task.service.TaskStreamEvent;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
@@ -26,8 +28,6 @@ import org.springframework.stereotype.Service;
 import org.springframework.util.CollectionUtils;
 import org.springframework.web.server.ResponseStatusException;
 import reactor.core.publisher.Flux;
-import reactor.core.publisher.Mono;
-import reactor.core.scheduler.Schedulers;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -44,11 +44,15 @@ import java.util.stream.Collectors;
  *
  * <p>一次请求内创建两个工作区声明的子 Agent（{@code personnel-matcher}、
  * {@code qualification-matcher}），用 {@link Flux#merge(Iterable)} 并发订阅两路事件流：
- * 任一子 Agent 每输出一条完整匹配结果，就立即转换为 SSE 事件推送给客户端；
+ * 任一子 Agent 每输出一条完整匹配结果，就立即转换为事件交给任务层落库并推送；
  * 两路都结束后再追加一条 {@code completed} 事件。</p>
  *
+ * <p>匹配与解析一样走任务化：{@code POST /tender/match} 只建任务并返回 taskId，
+ * 模型在后台执行，客户端订阅 {@code /tender/tasks/{taskId}/events} 先回放后实时，
+ * 断线重连不会重跑模型。</p>
+ *
  * <p>这里没有让主 Agent 通过 {@code agent_spawn} 自行调度，而是由 Java 侧确定性编排：
- * 两路并发是固定的，SSE 结果的模块归属和结束时机也可控。子 Agent 仍按工作区
+ * 两路并发是固定的，事件的模块归属和结束时机也可控。子 Agent 仍按工作区
  * {@code subagents/*.md} 声明创建，工具白名单与系统提示词与主 Agent 调度时一致。</p>
  */
 @Slf4j
@@ -86,18 +90,12 @@ public class TenderMatchingService {
     }
 
     /**
-     * 执行匹配并返回 SSE 事件流。
+     * 校验并读取招标要求，供建任务时做同步校验。
      *
-     * <p>读取招标要求在 {@link Schedulers#boundedElastic()} 上执行，避免阻塞 WebFlux
-     * 事件线程；招标要求不存在时返回 404。</p>
+     * <p>参数错误必须在建任务时以 400/404 返回，而不是等客户端订阅事件后才从
+     * {@code error} 事件里得知；同时把读到的对象交给后台执行，避免重复查库。</p>
      */
-    public Flux<MatchEvent<?>> match(MatchRequest request) {
-        return Mono.fromCallable(() -> loadRequirements(request.getTenderRequirementId()))
-                .subscribeOn(Schedulers.boundedElastic())
-                .flatMapMany(requirements -> run(request.getUserId(), requirements));
-    }
-
-    private TenderRequirements loadRequirements(Long tenderRequirementId) {
+    public TenderRequirements requireRequirements(Long tenderRequirementId) {
         if (tenderRequirementId == null) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "招标要求 tenderRequirementId 不能为空");
         }
@@ -109,13 +107,33 @@ public class TenderMatchingService {
         return requirements;
     }
 
+    /**
+     * 校验招标要求并生成匹配任务的流式契约（此时不跑模型）。
+     *
+     * <p>任务层只认 {@link TaskStream}：建流、落库、推送、终态都不需要知道匹配的内部编排。
+     * 校验放在建流之前，参数错误仍以 400/404 的 HTTP 状态码返回；模型调用放在
+     * {@link Flux#defer} 里，只有任务真正被订阅时才构建上下文与子 Agent，
+     * 幂等命中不会白跑一次（匹配要起两个子 Agent，代价比解析更高）。</p>
+     */
+    public TaskStream taskStream(MatchRequest request) {
+        TenderRequirements requirements = requireRequirements(request.getTenderRequirementId());
+        String userId = request.getUserId();
+        Flux<TaskStreamEvent> events = Flux.defer(() -> run(userId, requirements))
+                .filter(event -> event.getModule() != null)
+                .map(event -> new TaskStreamEvent(
+                        event.getModule().getCode(), event, event.getMessage()));
+        // 匹配的 error 是非终止告警（某一路失败/缺条），必须随流落库给回放；
+        // 只有 completed 才是成功信号
+        return new TaskStream(events, true);
+    }
+
     private Flux<MatchEvent<?>> run(String userId, TenderRequirements requirements) {
         RuntimeContext ctx = contextBuilder.build(userId);
         HarnessAgent.Builder builder = builderProvider.getObject();
         if (!registerMatcherDeclarations(builder)) {
+            // 不补 completed：配置缺失属于任务失败，任务层据此把状态落为 failed 并保留错误原因
             return Flux.just(
-                    MatchEvent.error("匹配子 Agent 未配置，请检查工作区 subagents/ 目录"),
-                    MatchEvent.completed());
+                    MatchEvent.error("匹配子 Agent 未配置，请检查工作区 subagents/ 目录"));
         }
 
         return Flux.using(
@@ -154,9 +172,7 @@ public class TenderMatchingService {
                                                 TenderRequirements requirements) {
         DefaultAgentManager manager = coordinator.getSubagentAgentManager();
         if (manager == null) {
-            return Flux.just(
-                    MatchEvent.error("子 Agent 管理器未初始化"),
-                    MatchEvent.completed());
+            return Flux.just(MatchEvent.error("子 Agent 管理器未初始化"));
         }
 
         List<Flux<MatchEvent<?>>> streams = new ArrayList<>();

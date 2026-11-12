@@ -47,6 +47,25 @@ export const tenderApi = {
   },
 
   /**
+   * 创建人员/资质匹配任务，立即返回 taskId；进度通过事件流订阅。
+   *
+   * 与解析任务同构：同一个 idempotencyKey 重复提交会返回同一个任务，
+   * 不会让两路子 Agent 再跑一遍。
+   */
+  async createMatchTask(
+    body: MatchRequestBody,
+    signal?: AbortSignal,
+    idempotencyKey?: string,
+  ): Promise<TenderTaskCreated> {
+    const result = await client.POST('/tender/match', {
+      body,
+      headers: idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined,
+      signal: withTimeout(signal, SHORT_TIMEOUT),
+    })
+    return unwrap<TenderTaskCreated>(result)
+  },
+
+  /**
    * 任务事件流地址。lastEventId > 0 时从该序号之后续传，
    * 与 SSE 的 Last-Event-ID 语义一致。
    */
@@ -153,4 +172,10 @@ export const tenderApi = {
 export interface TenderRequestBody {
   userId?: string
   tenderText: string
+}
+
+/** 匹配任务的请求体，与后端 MatchRequest 一致 */
+export interface MatchRequestBody {
+  userId?: string
+  tenderRequirementId: number
 }

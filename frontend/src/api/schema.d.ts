@@ -165,7 +165,7 @@ type MatchEvent = {
   message?: string
 }
 
-type TaskType = 'parse' | 'catalog' | 'catalog_adjust' | 'chapter'
+type TaskType = 'parse' | 'match' | 'catalog' | 'catalog_adjust' | 'chapter'
 
 type TaskStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled'
 
@@ -357,9 +357,9 @@ export interface paths {
         }
       }
       responses: {
-        200: {
+        202: {
           content: {
-            'text/event-stream': components['schemas']['MatchEvent']
+            'application/json': components['schemas']['TenderTaskCreated']
           }
         }
       }

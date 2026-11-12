@@ -24,8 +24,10 @@
 - **幂等与结果缓存**：解析、目录生成/调整、章节撰写均支持 `Idempotency-Key` 请求头。同一键重复提交
   复用同一个任务；目录/章节命中已完成的任务时直接返回缓存结果，不再调用模型。
   服务重启时，重启前未完成的任务会被标记为失败并补一条 `error` 事件，已产出的事件仍可回放。
-- **任务自愈与租约**：执行中的任务会周期性刷新 `updated_at`；超过 `TENDER_TASK_STALE_MINUTES`
-  （默认 10 分钟）没有更新的任务由定时扫描回收，客户端断开或进程崩溃不会让任务永久停在 `running`。
+- **任务自愈与租约**：执行中的任务会周期性刷新 `updated_at`（解析/匹配这类流式任务即使长时间没有事件也会发心跳）；
+  超过 `TENDER_TASK_STALE_MINUTES`（默认 10 分钟）没有更新的任务由定时扫描回收，
+  客户端断开或进程崩溃不会让任务永久停在 `running`。扫描会跳过本实例正在执行的任务，
+  避免把“首条结果还没出来”的长匹配误判为卡死。
   单实例部署保持 `TENDER_TASK_RECOVERY_ASSUME_EXCLUSIVE_STARTUP=true`；多实例/滚动发布必须设为 `false`，
   否则重启的实例会误判其它实例正在执行的任务。
 - **解析结果入库**：`POST /tender/parse/confirm`，主表 + 资质/业绩/人员/评分点四张子表持久化。
@@ -33,9 +35,15 @@
   支持按项目名称模糊搜索（`keyword`）与条数上限（`limit`，默认 50、最大 200）。
 - **投标目录生成**：`POST /tender/catalog`，输出最多三级的目录 JSON，支持商务/技术分列。
 - **章节撰写**：`POST /tender/chapter`，结合评分点生成章节正文。
-- **人员与企业资质匹配**：`POST /tender/match`，并发调度 `personnel-matcher` 与 `qualification-matcher`
-  两个子 Agent，匹配完一条就通过 SSE 推送一条，全部结束后推送 `completed`。
+- **人员与企业资质匹配（任务化 + 断线续传）**：`POST /tender/match` 只创建任务并返回 `taskId`，
+  两路子 Agent 在后台并发执行；通过 `GET /tender/tasks/{taskId}/events` 订阅（与解析共用同一套事件接口），
+  人员/资质事件可能交错到达，全部结束后推送 `completed`。人员与资质两路并行，匹配完一条就落库一条，
+  断线重连带 `Last-Event-ID` 即可续上，不会重复也不会遗漏，更不会重跑模型。
+  中间的 `error` 事件（某一路失败或缺条）不是终止信号，另一路仍会继续。
   首轮缺少结果时只针对缺失的 `requirementId` 自动补跑，次数由 `MATCHING_MAX_RETRIES` 控制（默认 1，0 表示关闭）。
+- **任务化的约定**：流式任务（解析、匹配）都通过 `TenderTaskService#createStreamingTask` 建任务，
+  领域侧只需交出一条 `TaskStream`（事件流 + 是否随流落库 error）；事件落库、推送、终态仲裁、
+  取消、断线回放都由任务层统一处理，任务层不反向依赖解析/匹配的领域服务。
 - **知识库**：`POST /knowledge/{knowledgeBaseName}` 批量写入并向量化，`GET /knowledge/search` 混合检索。
 - **Agent 编排**：主 Agent 调度 `tender-parser`、`catalog-builder`、`chapter-writer`、
   `personnel-matcher`、`qualification-matcher` 子 Agent，规则见工作区 `AGENTS.md`。
@@ -140,10 +148,15 @@ curl http://localhost:8080/tender/tasks/1024
 curl -X POST http://localhost:8080/tender/tasks/1024/cancel
 
 # 人员 + 企业资质并发匹配（tenderRequirementId 来自 /tender/parse/confirm）
-curl -N -X POST http://localhost:8080/tender/match \
+curl -X POST http://localhost:8080/tender/match \
   -H "Content-Type: application/json" \
-  -H "Accept: text/event-stream" \
+  -H "Idempotency-Key: $(uuidgen)" \
   -d '{"userId":"u1","tenderRequirementId":1234567890}'
+# {"taskId":2048,"type":"match","status":"running","eventsUrl":"/tender/tasks/2048/events"}
+
+# 订阅匹配事件流：与解析共用同一套任务接口，同样支持 Last-Event-ID 续传
+curl -N http://localhost:8080/tender/tasks/2048/events
+curl -N -H "Last-Event-ID: 5" http://localhost:8080/tender/tasks/2048/events
 ```
 
 ## Langfuse 链路追踪
