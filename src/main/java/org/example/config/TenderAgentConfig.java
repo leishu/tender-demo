@@ -2,7 +2,6 @@ package org.example.config;
 
 import io.agentscope.core.model.GenerateOptions;
 import io.agentscope.core.state.AgentStateStore;
-import io.agentscope.core.state.InMemoryAgentStateStore;
 import io.agentscope.core.tool.Toolkit;
 import io.agentscope.core.tracing.OtelTracingMiddleware;
 import io.agentscope.extensions.model.dashscope.DashScopeChatModel;
@@ -14,6 +13,8 @@ import org.example.enterprise.tool.EnterpriseDataTools;
 import org.example.middleware.LangfuseSpanEnrichmentMiddleware;
 import org.example.middleware.ModelCallAuditMiddleware;
 import org.example.parsing.tool.TenderTools;
+import org.example.state.MysqlAgentStateStore;
+import org.example.state.mapper.AgentStateMapper;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -51,10 +52,24 @@ public class TenderAgentConfig {
     /** Langfuse 启用时才会存在的内容补全中间件 */
     private final ObjectProvider<LangfuseSpanEnrichmentMiddleware> langfuseMiddlewareProvider;
 
+    /**
+     * 智能体状态存储：MySQL 持久化（表 t_agent_state，见 src/main/db/agent_state.sql）。
+     *
+     * <p>换成 MySQL 后：进程重启不再丢会话记忆；多个实例共享同一份 agent_state，
+     * 由 t_agent_state.version 的乐观锁保证并发写入不互相覆盖。</p>
+     *
+     * <p>过期清理按天执行，默认保留 90 天，配置项见 {@code agentscope.state-store.cleanup.*}；
+     * cron 由 {@code @Scheduled} 上的占位符解析，因此不在此处传入。</p>
+     */
     @Bean
-    public AgentStateStore agentStateStore() {
-        // 开发阶段先用内存存储；生产环境建议换成 RedisAgentStateStore
-        return new InMemoryAgentStateStore();
+    public AgentStateStore agentStateStore(
+            AgentStateMapper agentStateMapper,
+            @Value("${agentscope.state-store.cleanup.enabled:true}") boolean cleanupEnabled,
+            @Value("${agentscope.state-store.cleanup.retain-days:90}") int cleanupRetainDays,
+            @Value("${agentscope.state-store.cleanup.batch-size:1000}") int cleanupBatchSize) {
+        log.info("AgentStateStore 使用 MySQL 持久化：table=t_agent_state, 过期清理={}, 保留天数={}, 批大小={}",
+                cleanupEnabled ? "开启" : "关闭", cleanupRetainDays, cleanupBatchSize);
+        return new MysqlAgentStateStore(agentStateMapper, cleanupEnabled, cleanupRetainDays, cleanupBatchSize);
     }
 
     /**

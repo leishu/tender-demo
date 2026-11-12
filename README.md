@@ -49,6 +49,7 @@ mysql -u root -p tender_demo < src/main/db/tender_requirements.sql
 mysql -u root -p tender_demo < src/main/db/enterprise_data.sql
 mysql -u root -p tender_demo < src/main/db/knowledge_base.sql
 mysql -u root -p tender_demo < src/main/db/bid_catalog.sql
+mysql -u root -p tender_demo < src/main/db/agent_state.sql
 ```
 
 企业资质与人员的测试数据（可选，仅测试环境使用，会先清空这四张表）：

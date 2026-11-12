@@ -36,6 +36,33 @@ agentscope:
   # 可选：单轮思考 token 上限（如 8192），留空不限制；用于抑制超长推理
   thinking-budget: ${AGENTSCOPE_THINKING_BUDGET:}
 
+  # 智能体状态存储（MySQL 表 t_agent_state）：过期会话清理
+  state-store:
+    cleanup:
+      enabled: ${AGENT_STATE_CLEANUP_ENABLED:true}
+      # 保留天数；早于“当前时间 - retain-days”的整段会话会被删除。<=0 表示不按时间清理
+      # 默认 90 天，约等于三个月
+      retain-days: ${AGENT_STATE_RETAIN_DAYS:90}
+      # 单批删除的会话数，分批推进避免长事务持锁
+      batch-size: ${AGENT_STATE_CLEANUP_BATCH_SIZE:1000}
+      # 每天 04:00 执行；6 段 cron（秒 分 时 日 月 周）
+      cron: "${AGENT_STATE_CLEANUP_CRON:0 0 4 * * *}"
+
+  # workspace 会话记录清理：<workspace>/<userId>/agents/<agentId>/sessions/
+  # 关闭 memory 后 transcript 仍在写，仍需清理
+  workspace-cleanup:
+    enabled: ${AGENTSCOPE_SESSION_CLEANUP_ENABLED:true}
+    # 保留天数；<=0 表示不按时间清理
+    retain-days: ${AGENTSCOPE_SESSION_RETAIN_DAYS:30}
+    # 每个 agent 目录最多保留的会话组数；<=0 表示不按数量清理
+    max-sessions-per-agent: ${AGENTSCOPE_SESSION_MAX_PER_AGENT:200}
+    # 最近 N 分钟内修改过的会话不删，避免删掉正在写入的会话
+    active-protection-minutes: ${AGENTSCOPE_SESSION_ACTIVE_PROTECTION_MINUTES:10}
+    # 是否同时删除 default/<agentId>/<sessionId>/ 下的 events 文件；默认关闭
+    cleanup-events: ${AGENTSCOPE_SESSION_CLEANUP_EVENTS:false}
+    # 每天 03:30 执行；6 段 cron（秒 分 时 日 月 周）
+    cron: "${AGENTSCOPE_SESSION_CLEANUP_CRON:0 30 3 * * *}"
+
 
 # 人员/企业资质匹配
 matching:
