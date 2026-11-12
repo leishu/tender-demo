@@ -1,9 +1,11 @@
 package org.example.controller;
 
 import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import org.example.matching.model.req.MatchRequest;
 import org.example.matching.service.TenderMatchingService;
+import org.example.service.CallerIdentity;
 import org.example.task.model.TaskType;
 import org.example.task.model.dto.TenderTaskCreated;
 import org.example.task.service.TaskStream;
@@ -25,10 +27,13 @@ public class MatchingController {
 
     private final TenderTaskService taskService;
     private final TenderMatchingService matchingService;
+    private final CallerIdentity callerIdentity;
 
-    public MatchingController(TenderTaskService taskService, TenderMatchingService matchingService) {
+    public MatchingController(TenderTaskService taskService, TenderMatchingService matchingService,
+                              CallerIdentity callerIdentity) {
         this.taskService = taskService;
         this.matchingService = matchingService;
+        this.callerIdentity = callerIdentity;
     }
 
     @Operation(summary = "创建人员与企业资质匹配任务",
@@ -37,12 +42,17 @@ public class MatchingController {
                     通过 `GET /tender/tasks/{taskId}/events` 订阅（与解析共用同一套任务与事件接口）。
 
                     ### 请求体
-                    - `userId`：用户ID（可选）
                     - `tenderRequirementId`：已入库的招标要求主键（必填）
+                    - `userId`：用户ID（可选，**仅本地调试兜底**；正式环境用请求头）
+
+                    ### 调用者身份
+                    `X-User-Id` 请求头优先，缺失时才回退到请求体的 `userId`。任务归属与 Agent 会话
+                    都记在这个身份下，后续订阅事件/取消同样需要它。
 
                     ### 幂等
-                    可携带 `Idempotency-Key` 请求头（建议 UUID）。同一 key 重复提交返回**同一个
-                    taskId**，不会让两路匹配再跑一遍；想重新匹配请换一个新 key。
+                    可携带 `Idempotency-Key` 请求头（建议 UUID）。同一用户用同一 key 重复提交返回
+                    **同一个 taskId**，不会让两路匹配再跑一遍；不同用户撞同一个 key 互不影响。
+                    想重新匹配请换一个新 key。
 
                     ### 响应
                     - `taskId`：任务ID，用于订阅事件与查询状态
@@ -71,13 +81,17 @@ public class MatchingController {
     @ResponseStatus(HttpStatus.ACCEPTED)
     public Mono<TenderTaskCreated> match(
             @RequestBody MatchRequest request,
-            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey) {
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+            @Parameter(description = "调用者身份（由网关注入；本地调试可省略）")
+            @RequestHeader(value = CallerIdentity.USER_HEADER, required = false) String userHeader) {
+        // 身份先于业务校验解析：允许请求头兜底被关闭时，未认证请求直接 401
+        String callerId = callerIdentity.resolve(userHeader, request.getUserId());
         return Mono.fromCallable(() -> {
             // 先校验、后查幂等键：参数错误（400/404）始终如实暴露，不会被幂等命中掩盖。
             // 副作用是“建任务后招标要求被删”时同 key 重试用会拿到 404 而不是原任务——
             // 窗口极小的边界情况，可以接受。
-            TaskStream stream = matchingService.taskStream(request);
-            return taskService.createStreamingTask(TaskType.MATCH, request.getUserId(),
+            TaskStream stream = matchingService.taskStream(request, callerId);
+            return taskService.createStreamingTask(TaskType.MATCH, callerId,
                     idempotencyKey, request, stream);
         }).subscribeOn(Schedulers.boundedElastic());
     }

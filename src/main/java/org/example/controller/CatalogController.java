@@ -12,6 +12,7 @@ import org.example.catalog.model.req.CatalogSaveRequest;
 import org.example.catalog.prompt.CatalogPromptProvider;
 import org.example.catalog.service.BidCatalogService;
 import org.example.catalog.service.CatalogGenerationService;
+import org.example.service.CallerIdentity;
 import org.example.task.model.TaskType;
 import org.example.task.service.TenderTaskService;
 import org.springframework.http.HttpStatus;
@@ -30,15 +31,18 @@ public class CatalogController {
     private final CatalogGenerationService catalogGenerationService;
     private final BidCatalogService bidCatalogService;
     private final TenderTaskService taskService;
+    private final CallerIdentity callerIdentity;
 
     public CatalogController(CatalogPromptProvider catalogPromptProvider,
                              BidCatalogService bidCatalogService,
                              CatalogGenerationService catalogGenerationService,
-                             TenderTaskService taskService) {
+                             TenderTaskService taskService,
+                             CallerIdentity callerIdentity) {
         this.catalogPromptProvider = catalogPromptProvider;
         this.bidCatalogService = bidCatalogService;
         this.catalogGenerationService = catalogGenerationService;
         this.taskService = taskService;
+        this.callerIdentity = callerIdentity;
     }
 
 
@@ -64,21 +68,24 @@ public class CatalogController {
                       重试后仍失败返回 502 Bad Gateway。
 
                     ### 幂等（结果缓存）
-                    可携带 `Idempotency-Key` 请求头。同一 key 命中已完成的任务时**直接返回缓存的目录**，
-                    不再调用模型；命中执行中的任务返回 409 Conflict。
-                    失败后重试同一个 key 会复用原任务重跑，不会新建任务。
+                    可携带 `Idempotency-Key` 请求头。同一用户用同一 key 命中已完成的任务时
+                    **直接返回缓存的目录**，不再调用模型；命中执行中的任务返回 409 Conflict；
+                    失败后重试同一个 key 会复用原任务重跑，不会新建任务。不同用户撞同一个 key 互不影响。
                     """)
     @PostMapping("/catalog")
     public Mono<CatalogResult> generateCatalog(
             @RequestBody CatalogRequest request,
-            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey) {
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+            @Parameter(description = "调用者身份（由网关注入；本地调试可省略）")
+            @RequestHeader(value = CallerIdentity.USER_HEADER, required = false) String userHeader) {
+        String callerId = callerIdentity.resolve(userHeader, request.getUserId());
         // 提示词在真正调用模型时才渲染：命中缓存时连提示词都不必拼
         return taskService.runOnce(TaskType.CATALOG,
-                request.getUserId(),
+                callerId,
                 idempotencyKey,
                 request,
                 CatalogResult.class,
-                () -> catalogGenerationService.generate(request.getUserId(),
+                () -> catalogGenerationService.generate(callerId,
                         catalogPromptProvider.render(request.getTenderRequirementId())));
     }
 
@@ -105,13 +112,15 @@ public class CatalogController {
                       重试后仍失败返回 502 Bad Gateway。
 
                     ### 幂等（结果缓存）
-                    可携带 `Idempotency-Key` 请求头。同一 key 命中已完成的任务时直接返回缓存的目录，
-                    不再调用模型；命中执行中的任务返回 409 Conflict。
+                    可携带 `Idempotency-Key` 请求头。同一用户用同一 key 命中已完成的任务时直接返回
+                    缓存的目录，不再调用模型；命中执行中的任务返回 409 Conflict。
                     """)
     @PostMapping("/catalog/adjust")
     public Mono<CatalogResult> adjustCatalog(
             @RequestBody CatalogAdjustRequest request,
-            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey) {
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+            @Parameter(description = "调用者身份（由网关注入；本地调试可省略）")
+            @RequestHeader(value = CallerIdentity.USER_HEADER, required = false) String userHeader) {
         if (request.getPreviousCatalog() == null) {
             return Mono.error(new ResponseStatusException(
                     HttpStatus.BAD_REQUEST, "上一轮生成的目录 previousCatalog 不能为空"));
@@ -120,12 +129,13 @@ public class CatalogController {
             return Mono.error(new ResponseStatusException(
                     HttpStatus.BAD_REQUEST, "用户调整要求 customPrompt 不能为空"));
         }
+        String callerId = callerIdentity.resolve(userHeader, request.getUserId());
         return taskService.runOnce(TaskType.CATALOG_ADJUST,
-                request.getUserId(),
+                callerId,
                 idempotencyKey,
                 request,
                 CatalogResult.class,
-                () -> catalogGenerationService.generate(request.getUserId(),
+                () -> catalogGenerationService.generate(callerId,
                         adjustmentBlocks(catalogPromptProvider.renderAdjustment(
                                 request.getTenderRequirementId(),
                                 request.getPreviousCatalog(), request.getCustomPrompt()))));

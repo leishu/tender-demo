@@ -1,9 +1,23 @@
 import createClient from 'openapi-fetch'
 import type { paths } from './schema'
+import { identityHeaders } from './identity'
 
 export const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '')
 
 export const client = createClient<paths>({ baseUrl: apiBaseUrl })
+
+/**
+ * 统一注入调用者身份。放在中间件里而不是每个调用点手写：
+ * 任务查询、取消这类接口没有请求体，漏带身份就会被当成匿名用户而拿到 404。
+ */
+client.use({
+  onRequest({ request }) {
+    for (const [name, value] of Object.entries(identityHeaders())) {
+      request.headers.set(name, value)
+    }
+    return request
+  },
+})
 
 export class ApiError extends Error {
   readonly status: number

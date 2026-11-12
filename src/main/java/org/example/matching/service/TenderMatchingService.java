@@ -114,11 +114,12 @@ public class TenderMatchingService {
      * 校验放在建流之前，参数错误仍以 400/404 的 HTTP 状态码返回；模型调用放在
      * {@link Flux#defer} 里，只有任务真正被订阅时才构建上下文与子 Agent，
      * 幂等命中不会白跑一次（匹配要起两个子 Agent，代价比解析更高）。</p>
+     *
+     * @param callerId 调用者身份；作为 Agent 会话命名空间，不取请求体里的 {@code userId}
      */
-    public TaskStream taskStream(MatchRequest request) {
+    public TaskStream taskStream(MatchRequest request, String callerId) {
         TenderRequirements requirements = requireRequirements(request.getTenderRequirementId());
-        String userId = request.getUserId();
-        Flux<TaskStreamEvent> events = Flux.defer(() -> run(userId, requirements))
+        Flux<TaskStreamEvent> events = Flux.defer(() -> run(callerId, requirements))
                 .filter(event -> event.getModule() != null)
                 .map(event -> new TaskStreamEvent(
                         event.getModule().getCode(), event, event.getMessage()));

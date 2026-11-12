@@ -12,6 +12,7 @@ import org.example.parsing.model.TenderRequirements;
 import org.example.parsing.model.dto.TenderRequirementSummary;
 import org.example.parsing.model.req.TenderRequest;
 import org.example.parsing.service.TenderRequirementsService;
+import org.example.service.CallerIdentity;
 import org.example.service.IdempotencyStore;
 import org.example.service.RuntimeContextBuilder;
 import org.example.task.model.TaskType;
@@ -48,17 +49,20 @@ public class TenderController {
     private final RuntimeContextBuilder contextBuilder;
     private final IdempotencyStore idempotencyStore;
     private final TenderTaskService taskService;
+    private final CallerIdentity callerIdentity;
 
     public TenderController(ObjectProvider<HarnessAgent.Builder> builderProvider,
                             TenderRequirementsService requirementService,
                             RuntimeContextBuilder contextBuilder,
                             IdempotencyStore idempotencyStore,
-                            TenderTaskService taskService) {
+                            TenderTaskService taskService,
+                            CallerIdentity callerIdentity) {
         this.builderProvider = builderProvider;
         this.requirementService = requirementService;
         this.contextBuilder = contextBuilder;
         this.idempotencyStore = idempotencyStore;
         this.taskService = taskService;
+        this.callerIdentity = callerIdentity;
     }
 
     @Operation(summary = "创建招标文件解析任务",
@@ -68,12 +72,17 @@ public class TenderController {
                     响应里会让一次网络抖动就丢掉全部已产出的内容，因此改为“建任务 + 订阅事件”。
 
                     ### 请求体
-                    - `userId`：用户ID（可选）
                     - `tenderText`：招标文件原始文本（必填）
+                    - `userId`：用户ID（可选，**仅本地调试兜底**；正式环境用请求头）
+
+                    ### 调用者身份
+                    `X-User-Id` 请求头优先，缺失时才回退到请求体的 `userId`。
+                    身份决定任务的归属：后续查询、订阅事件、取消都只能操作自己的任务。
 
                     ### 幂等
-                    可携带 `Idempotency-Key` 请求头（建议 UUID）。同一 key 重复提交返回**同一个
-                    taskId**，不会重复调用模型；想重新解析请换一个新 key。
+                    可携带 `Idempotency-Key` 请求头（建议 UUID）。同一用户用同一 key 重复提交返回
+                    **同一个 taskId**，不会重复调用模型；不同用户撞同一个 key 互不影响。
+                    想重新解析请换一个新 key。
 
                     ### 响应
                     - `taskId`：任务ID，用于订阅事件与查询状态
@@ -90,8 +99,11 @@ public class TenderController {
     @ResponseStatus(HttpStatus.ACCEPTED)
     public Mono<TenderTaskCreated> parseTender(
             @RequestBody TenderRequest request,
-            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey) {
-        return Mono.fromCallable(() -> taskService.createParseTask(request, idempotencyKey))
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+            @Parameter(description = "调用者身份（由网关注入；本地调试可省略）")
+            @RequestHeader(value = CallerIdentity.USER_HEADER, required = false) String userHeader) {
+        String callerId = callerIdentity.resolve(userHeader, request.getUserId());
+        return Mono.fromCallable(() -> taskService.createParseTask(request, idempotencyKey, callerId))
                 .subscribeOn(Schedulers.boundedElastic());
     }
 
@@ -133,7 +145,8 @@ public class TenderController {
                     匹配任务中间的 `error` 事件表示某一路失败或缺条，**不是终止信号**，另一路仍会继续。
 
                     ### 失败说明
-                    任务不存在时同样返回 200 + 一条 `error` 事件，避免 SSE 响应头已提交后无法改状态码。
+                    任务不存在、或不属于当前调用者时同样返回 200 + 一条 `error` 事件，
+                    避免 SSE 响应头已提交后无法改状态码；两者文案一致，不区分“不存在”与“无权限”。
                     """)
     @GetMapping(value = "/tasks/{taskId}/events", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public Flux<ServerSentEvent<String>> streamTaskEvents(
@@ -141,9 +154,13 @@ public class TenderController {
             @Parameter(description = "已收到的最大事件序号，缺省 0 表示从头回放")
             @RequestParam(value = "lastEventId", required = false) Integer lastEventId,
             @Parameter(description = "同 lastEventId，SSE 原生重连会自动携带")
-            @RequestHeader(value = "Last-Event-ID", required = false) String lastEventIdHeader) {
+            @RequestHeader(value = "Last-Event-ID", required = false) String lastEventIdHeader,
+            @Parameter(description = "调用者身份（由网关注入）")
+            @RequestHeader(value = CallerIdentity.USER_HEADER, required = false) String userHeader) {
         int cursor = resolveCursor(lastEventId, lastEventIdHeader);
-        return taskService.stream(taskId, cursor)
+        // SSE 没有请求体，身份只能来自请求头；本地调试省略时按匿名处理
+        String callerId = callerIdentity.resolve(userHeader, null);
+        return taskService.stream(taskId, cursor, callerId)
                 .map(TenderController::toServerSentEvent)
                 .subscribeOn(Schedulers.boundedElastic());
     }
@@ -159,12 +176,15 @@ public class TenderController {
                     - `result`：目录/章节任务的缓存结果；解析任务为空（结果由事件承载）
 
                     ### 失败说明
-                    任务不存在返回 404 Not Found。
+                    任务不存在、或不属于当前调用者返回 404 Not Found（两者不区分，避免枚举他人任务）。
                     """)
     @GetMapping("/tasks/{taskId}")
     public Mono<TenderTaskView> getTask(
-            @Parameter(description = "任务ID") @PathVariable("taskId") long taskId) {
-        return Mono.fromCallable(() -> taskService.getTask(taskId))
+            @Parameter(description = "任务ID") @PathVariable("taskId") long taskId,
+            @Parameter(description = "调用者身份（由网关注入）")
+            @RequestHeader(value = CallerIdentity.USER_HEADER, required = false) String userHeader) {
+        String callerId = callerIdentity.resolve(userHeader, null);
+        return Mono.fromCallable(() -> taskService.getTask(taskId, callerId))
                 .subscribeOn(Schedulers.boundedElastic());
     }
 
@@ -175,13 +195,16 @@ public class TenderController {
 
                     ### 响应说明
                     - 204 No Content：已受理；任务已处于终态时同样返回 204（幂等）。
-                    - 任务不存在返回 404 Not Found；目录/章节这类同步任务不支持取消，返回 409。
+                    - 任务不存在或不属于当前调用者返回 404 Not Found；目录/章节这类同步任务不支持取消，返回 409。
                     """)
     @PostMapping("/tasks/{taskId}/cancel")
     @ResponseStatus(HttpStatus.NO_CONTENT)
     public Mono<Void> cancelTask(
-            @Parameter(description = "任务ID") @PathVariable("taskId") long taskId) {
-        return Mono.fromRunnable(() -> taskService.cancel(taskId))
+            @Parameter(description = "任务ID") @PathVariable("taskId") long taskId,
+            @Parameter(description = "调用者身份（由网关注入）")
+            @RequestHeader(value = CallerIdentity.USER_HEADER, required = false) String userHeader) {
+        String callerId = callerIdentity.resolve(userHeader, null);
+        return Mono.fromRunnable(() -> taskService.cancel(taskId, callerId))
                 .subscribeOn(Schedulers.boundedElastic())
                 .then();
     }
@@ -239,21 +262,25 @@ public class TenderController {
                     根据章节标题与关联的评分点撰写投标章节内容。
 
                     ### 幂等
-                    可携带 `Idempotency-Key` 请求头。同一 key 命中已完成的任务时直接返回缓存正文，
-                    不重复调用模型；命中执行中的任务返回 409。
+                    可携带 `Idempotency-Key` 请求头。同一用户用同一 key 命中已完成的任务时直接返回
+                    缓存正文，不重复调用模型；命中执行中的任务返回 409。
                     """)
     @PostMapping("/chapter")
     public Mono<String> generateChapter(@RequestBody ChapterRequest request,
                                         @RequestHeader(value = "Idempotency-Key", required = false)
-                                        String idempotencyKey) {
+                                        String idempotencyKey,
+                                        @Parameter(description = "调用者身份（由网关注入）")
+                                        @RequestHeader(value = CallerIdentity.USER_HEADER, required = false)
+                                        String userHeader) {
+        String callerId = callerIdentity.resolve(userHeader, request.getUserId());
         // 会话在真正需要调用模型时才创建：命中缓存时不消耗 sessionId，也不 build agent
         return taskService.runOnce(TaskType.CHAPTER,
-                request.getUserId(),
+                callerId,
                 idempotencyKey,
                 request,
                 String.class,
                 () -> {
-                    RuntimeContext ctx = contextBuilder.build(request.getUserId());
+                    RuntimeContext ctx = contextBuilder.build(callerId);
                     HarnessAgent.Builder builder = builderProvider.getObject();
                     return Mono.using(
                             builder::build,

@@ -7,6 +7,7 @@ import type {
   TenderTaskView,
 } from '@/api/types'
 import { tenderApi } from '@/api/tender'
+import { identityHeaders } from '@/api/identity'
 import { streamSse } from './useSse'
 import { applyParseEvent, createEmptyRequirements } from '@/features/parse/parseReducer'
 import { isAbortError, toErrorMessage } from '@/utils/async'
@@ -182,6 +183,8 @@ export function useTenderParse() {
       try {
         await streamSse(tenderApi.taskEventsUrl(id, cursor), {
           method: 'GET',
+          // 事件订阅没有请求体，身份只能靠请求头；漏带会被服务端当成别人的任务而回放不到事件
+          headers: identityHeaders(),
           signal: controller.value?.signal,
           onMessage: (data, message) => {
             const seq = Number(message.id)

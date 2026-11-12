@@ -8,6 +8,7 @@ import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
 import org.example.parsing.model.req.TenderRequest;
 import org.example.parsing.service.TenderParseEventTransformer;
+import org.example.service.CallerIdentity;
 import org.example.service.RuntimeContextBuilder;
 import org.example.task.mapper.TenderTaskMapper;
 import org.example.task.model.TaskStatus;
@@ -62,6 +63,10 @@ import java.util.function.Supplier;
  *
  * <p>目录/章节这类“结果可缓存”的任务复用同一张表：{@link #runOnce} 以幂等键查任务，
  * 命中已完成的任务直接返回缓存结果，不重复调用模型。</p>
+ *
+ * <p><b>归属边界</b>：{@code taskId} 是自增主键，可被顺序枚举，因此所有按 id 的读/取消都必须
+ * 带上调用者身份，只返回、只允许操作 {@code user_id} 一致的任务。非本人与不存在一律返回同一个
+ * 404，避免把“任务存在但不属于你”变成探测信号（见 {@link #requireOwned}）。</p>
  */
 @Slf4j
 @Service
@@ -124,18 +129,22 @@ public class TenderTaskService {
     /**
      * 创建解析任务并立即返回。
      *
-     * <p>携带 {@code Idempotency-Key} 时，同一键重复提交返回同一个 taskId：
-     * 网络超时后客户端重发、用户重复点击都不会产生第二次模型调用。</p>
+     * <p>携带 {@code Idempotency-Key} 时，同一用户用同一键重复提交返回同一个 taskId：
+     * 网络超时后客户端重发、用户重复点击都不会产生第二次模型调用。
+     * 幂等的作用域是 {@code (user_id, idempotency_key)}，不同用户撞同一个键互不影响。</p>
      *
      * <p>命中已有任务时不做任何状态改写：任务失败也原样返回，客户端可以回放事件看到失败原因，
      * 想重新解析请使用新的幂等键。</p>
+     *
+     * @param callerId 调用者身份（见 {@code CallerIdentity}），既是任务归属，也是 Agent 会话归属
      */
-    public TenderTaskCreated createParseTask(TenderRequest request, String idempotencyKey) {
+    public TenderTaskCreated createParseTask(TenderRequest request, String idempotencyKey, String callerId) {
         if (request.getTenderText() == null || request.getTenderText().isBlank()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "招标文件文本 tenderText 不能为空");
         }
-        return createStreamingTask(TaskType.PARSE, request.getUserId(), idempotencyKey, request,
-                parseStream(request.getTenderText(), request.getUserId()));
+        String owner = CallerIdentity.normalize(callerId);
+        return createStreamingTask(TaskType.PARSE, owner, idempotencyKey, request,
+                parseStream(request.getTenderText(), owner));
     }
 
     /**
@@ -166,27 +175,29 @@ public class TenderTaskService {
      * <p>任务层对领域只依赖 {@link TaskStream}：解析由本类的 {@link #parseStream} 组装，
      * 匹配由 {@code TenderMatchingService#taskStream} 组装，两边共用同一套落库/推送/终态逻辑。</p>
      *
+     * @param userId 调用者身份；归一化后写入 {@code user_id}，同时作为幂等键的作用域
      * @param stream 领域事件流与终止语义，订阅时才真正跑模型
      */
     public TenderTaskCreated createStreamingTask(TaskType type, String userId, String idempotencyKey,
                                                  Object input, TaskStream stream) {
+        String owner = CallerIdentity.normalize(userId);
         String key = normalizeKey(idempotencyKey);
         if (key != null) {
-            TenderTaskRecord existing = findByIdempotencyKey(key);
+            TenderTaskRecord existing = findByIdempotencyKey(owner, key);
             if (existing != null) {
                 requireSameType(existing, type);
-                log.info("命中幂等键，复用已有任务: type={}, key={}, taskId={}, status={}",
-                        type.getCode(), key, existing.getId(), existing.getStatus());
+                log.info("命中幂等键，复用已有任务: type={}, user={}, key={}, taskId={}, status={}",
+                        type.getCode(), owner, key, existing.getId(), existing.getStatus());
                 return toCreated(existing);
             }
         }
 
-        TenderTaskRecord task = newTask(type, userId, key, input);
+        TenderTaskRecord task = newTask(type, owner, key, input);
         try {
             taskMapper.insert(task);
         } catch (DuplicateKeyException e) {
-            // 并发重复提交：唯一键兜底，回读先创建的那条
-            TenderTaskRecord existing = key == null ? null : findByIdempotencyKey(key);
+            // 并发重复提交：唯一键兜底，回读先创建的那条（同用户同键才会冲突）
+            TenderTaskRecord existing = key == null ? null : findByIdempotencyKey(owner, key);
             if (existing == null) {
                 throw e;
             }
@@ -202,12 +213,14 @@ public class TenderTaskService {
     /**
      * 订阅任务事件：先回放已落库的，再接实时；游标取自客户端的 {@code Last-Event-ID}。
      *
-     * <p>任务不存在时返回一条 error 事件而不是 404：SSE 端点一旦开始写响应，
-     * 状态码已经无法回退，沿用项目内“SSE 异常走 error 事件”的既有约定。</p>
+     * <p>任务不存在、或不属于调用者时，返回一条 error 事件而不是 403/404：SSE 端点一旦开始写响应，
+     * 状态码已经无法回退，沿用项目内“SSE 异常走 error 事件”的既有约定。两种情况给出同一句话，
+     * 不区分“不存在”与“无权限”，免得 {@code taskId} 变成可枚举的探测面。</p>
      */
-    public Flux<TaskEvent> stream(long taskId, int lastEventId) {
+    public Flux<TaskEvent> stream(long taskId, int lastEventId, String userId) {
         return Flux.defer(() -> {
-            if (!exists(taskId)) {
+            if (findOwned(taskId, userId) == null) {
+                log.warn("拒绝订阅非本人任务: taskId={}, user={}", taskId, userId);
                 return Flux.just(new TaskEvent(0, EVENT_ERROR,
                         writeJson(errorPayload("任务不存在: " + taskId))));
             }
@@ -215,12 +228,9 @@ public class TenderTaskService {
         });
     }
 
-    /** 查询任务状态；不存在时 404 */
-    public TenderTaskView getTask(long taskId) {
-        TenderTaskRecord task = taskMapper.selectById(taskId);
-        if (task == null) {
-            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "任务不存在: " + taskId);
-        }
+    /** 查询任务状态；不存在或不属于调用者时统一 404（不区分二者，避免枚举出他人任务是否存在） */
+    public TenderTaskView getTask(long taskId, String userId) {
+        TenderTaskRecord task = requireOwned(taskId, userId);
         return new TenderTaskView(
                 task.getId(),
                 task.getTaskType(),
@@ -233,8 +243,26 @@ public class TenderTaskService {
                 task.getFinishedAt());
     }
 
-    public boolean exists(long taskId) {
-        return taskMapper.selectById(taskId) != null;
+    /**
+     * 取任务并校验归属。
+     *
+     * <p>用 {@code id + user_id} 一次性查出，别人的行根本不会进内存；查不到统一按“任务不存在”处理，
+     * 语义上把越权访问折叠成 404，既不给探测信号，也不泄露他人的任务类型与状态。</p>
+     */
+    private TenderTaskRecord requireOwned(long taskId, String userId) {
+        TenderTaskRecord task = findOwned(taskId, userId);
+        if (task == null) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "任务不存在: " + taskId);
+        }
+        return task;
+    }
+
+    private TenderTaskRecord findOwned(long taskId, String userId) {
+        String owner = CallerIdentity.normalize(userId);
+        return taskMapper.selectOne(new LambdaQueryWrapper<TenderTaskRecord>()
+                .eq(TenderTaskRecord::getId, taskId)
+                .eq(TenderTaskRecord::getUserId, owner)
+                .last("LIMIT 1"));
     }
 
     /**
@@ -243,12 +271,12 @@ public class TenderTaskService {
      * <p>取消与自然结束会竞争同一个终态。这里先用条件更新 {@code finish} 抢终态，
      * 只有抢到的线程才允许追加终止事件，避免出现“状态 succeeded、事件流却以
      * error(解析已取消) 结束”这种自相矛盾的结果。</p>
+     *
+     * <p>只能取消自己的任务；别人的任务按“不存在”处理（404），否则任意人拿到自增的 taskId
+     * 就能打断他人的解析并烧掉已产出的结果。</p>
      */
-    public void cancel(long taskId) {
-        TenderTaskRecord task = taskMapper.selectById(taskId);
-        if (task == null) {
-            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "任务不存在: " + taskId);
-        }
+    public void cancel(long taskId, String userId) {
+        TenderTaskRecord task = requireOwned(taskId, userId);
         TaskType type = task.getTaskType();
         if (type == null || !type.isStreaming()) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "只有解析/匹配任务支持取消");
@@ -674,9 +702,10 @@ public class TenderTaskService {
     /** 幂等判定：命中缓存 / 正在执行 / 需要重跑 / 新建，全部在这里定下来（阻塞调用） */
     private <T> Prepared<T> prepare(TaskType type, String userId, String idempotencyKey,
                                     Object input, Class<T> resultType) {
+        String owner = CallerIdentity.normalize(userId);
         String key = normalizeKey(idempotencyKey);
         if (key != null) {
-            TenderTaskRecord existing = findByIdempotencyKey(key);
+            TenderTaskRecord existing = findByIdempotencyKey(owner, key);
             if (existing != null) {
                 requireSameType(existing, type);
                 TaskStatus status = existing.getStatus();
@@ -711,7 +740,7 @@ public class TenderTaskService {
             }
         }
 
-        TenderTaskRecord task = newTask(type, userId, key, input);
+        TenderTaskRecord task = newTask(type, owner, key, input);
         try {
             taskMapper.insert(task);
         } catch (DuplicateKeyException e) {
@@ -774,7 +803,8 @@ public class TenderTaskService {
         TenderTaskRecord task = new TenderTaskRecord();
         task.setTaskType(type);
         task.setStatus(TaskStatus.RUNNING);
-        task.setUserId(StringUtils.hasText(userId) ? userId : "__anon__");
+        // 归属列必须与幂等作用域用同一个归一化结果，否则查得到 / 查不到会随调用路径漂移
+        task.setUserId(CallerIdentity.normalize(userId));
         task.setIdempotencyKey(key);
         task.setInputJson(writeJson(input));
         task.setLastEventSeq(0);
@@ -787,8 +817,16 @@ public class TenderTaskService {
         return new TenderTaskCreated(task.getId(), task.getTaskType(), task.getStatus(), eventsUrl(task.getId()));
     }
 
-    private TenderTaskRecord findByIdempotencyKey(String key) {
+    /**
+     * 按 {@code (user_id, idempotency_key)} 查已有任务。
+     *
+     * <p>幂等键由客户端生成，全局唯一会让两个用户撞同一个键时互相拿到对方的任务——
+     * 既是串号也是越权。作用域收到用户维度后，唯一索引同步改为
+     * {@code uk_tender_task_user_idempotency (user_id, idempotency_key)}。</p>
+     */
+    private TenderTaskRecord findByIdempotencyKey(String userId, String key) {
         return taskMapper.selectOne(new LambdaQueryWrapper<TenderTaskRecord>()
+                .eq(TenderTaskRecord::getUserId, CallerIdentity.normalize(userId))
                 .eq(TenderTaskRecord::getIdempotencyKey, key)
                 .last("LIMIT 1"));
     }

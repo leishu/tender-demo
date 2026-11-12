@@ -1,9 +1,9 @@
 import { computed, ref, watch } from 'vue'
 import { defineStore } from 'pinia'
 import type { CatalogResult, TenderRequirements } from '@/api/types'
+import { getUserId } from '@/api/identity'
 
 const STORAGE_KEY = 'tender-demo:workflow'
-const USER_KEY = 'tender-demo:user-id'
 
 interface PersistedState {
   tenderRequirementId: number | null
@@ -48,20 +48,6 @@ function loadState(): PersistedState {
   }
 }
 
-function loadUserId(): string {
-  try {
-    const existing = localStorage.getItem(USER_KEY)
-    if (existing) {
-      return existing
-    }
-    const created = `web-${Math.random().toString(36).slice(2, 10)}`
-    localStorage.setItem(USER_KEY, created)
-    return created
-  } catch {
-    return `web-${Math.random().toString(36).slice(2, 10)}`
-  }
-}
-
 /**
  * 工作流状态：只放跨页面共享的 ID 与结构化结果。
  * 表单草稿、弹窗开关等留在组件内部。
@@ -69,7 +55,8 @@ function loadUserId(): string {
 export const useWorkflowStore = defineStore('workflow', () => {
   const initial = loadState()
 
-  const userId = ref(loadUserId())
+  // 身份由 api/identity 统一管理：它同时负责给每个请求（含 SSE）注入 X-User-Id
+  const userId = ref(getUserId())
   const tenderRequirementId = ref<number | null>(initial.tenderRequirementId)
   const requirements = ref<TenderRequirements | null>(initial.requirements)
   const catalogResult = ref<CatalogResult | null>(initial.catalogResult)

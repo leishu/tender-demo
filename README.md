@@ -21,8 +21,12 @@
   模型在后台执行；`GET /tender/tasks/{taskId}/events` 订阅事件流——先回放已落库的事件，再接实时事件，
   断线带 `Last-Event-ID`（或 `?lastEventId=N`）即可续上，不会重复也不会遗漏。
   `GET /tender/tasks/{taskId}` 查任务状态，`POST /tender/tasks/{taskId}/cancel` 取消并停止上游模型调用。
-- **幂等与结果缓存**：解析、目录生成/调整、章节撰写均支持 `Idempotency-Key` 请求头。同一键重复提交
-  复用同一个任务；目录/章节命中已完成的任务时直接返回缓存结果，不再调用模型。
+- **任务归属**：`taskId` 是自增主键、可被顺序枚举，因此按 id 的查询/订阅/取消都必须带调用者身份
+  （`X-User-Id` 请求头），只对 `user_id` 一致的任务生效；非本人与不存在统一返回 404（SSE 上是 `error` 事件），
+  不区分“不存在”和“无权限”，避免把 `taskId` 变成探测他人任务的入口。
+- **幂等与结果缓存**：解析、目录生成/调整、章节撰写均支持 `Idempotency-Key` 请求头。幂等作用域是
+  `(user_id, idempotency_key)`：同一用户重复提交复用同一个任务，不同用户撞同一个键互不影响
+  （全局唯一会让两个用户拿到对方的任务）。目录/章节命中已完成的任务时直接返回缓存结果，不再调用模型。
   服务重启时，重启前未完成的任务会被标记为失败并补一条 `error` 事件，已产出的事件仍可回放。
 - **任务自愈与租约**：执行中的任务会周期性刷新 `updated_at`（解析/匹配这类流式任务即使长时间没有事件也会发心跳）；
   超过 `TENDER_TASK_STALE_MINUTES`（默认 10 分钟）没有更新的任务由定时扫描回收，
@@ -128,35 +132,41 @@ mvn spring-boot:run
 
 ### 6. 调用示例
 
+> 调用者身份统一走 `X-User-Id` 请求头；本地演示为了省事也接受请求体的 `userId`（见
+> `TENDER_AUTH_ALLOW_BODY_USER_ID`）。对外部署应设为 `false` 并由认证层/网关注入该头，
+> 否则改一个请求体字段就能冒充别人。**订阅事件、查状态、取消这三个接口没有请求体，必须带请求头。**
+
 ```bash
-# 1) 创建解析任务：立即返回 taskId（幂等键可选，重复提交返回同一任务，不重复调用模型）
+# 1) 创建解析任务：立即返回 taskId（幂等键可选，同用户重复提交返回同一任务，不重复调用模型）
 curl -X POST http://localhost:8080/tender/parse \
   -H "Content-Type: application/json" \
+  -H "X-User-Id: u1" \
   -H "Idempotency-Key: $(uuidgen)" \
-  -d '{"userId":"u1","tenderText":"……招标文件正文……"}'
+  -d '{"tenderText":"……招标文件正文……"}'
 # {"taskId":1024,"type":"parse","status":"running","eventsUrl":"/tender/tasks/1024/events"}
 
 # 2) 订阅事件流：先回放已落库事件，再接实时事件
-curl -N http://localhost:8080/tender/tasks/1024/events
+curl -N -H "X-User-Id: u1" http://localhost:8080/tender/tasks/1024/events
 
 # 3) 断线续传：把已收到的最后一条 id 带上，只补发缺失的一段
-curl -N -H "Last-Event-ID: 7" http://localhost:8080/tender/tasks/1024/events
-curl -N "http://localhost:8080/tender/tasks/1024/events?lastEventId=7"
+curl -N -H "X-User-Id: u1" -H "Last-Event-ID: 7" http://localhost:8080/tender/tasks/1024/events
+curl -N -H "X-User-Id: u1" "http://localhost:8080/tender/tasks/1024/events?lastEventId=7"
 
-# 4) 任务状态 / 取消
-curl http://localhost:8080/tender/tasks/1024
-curl -X POST http://localhost:8080/tender/tasks/1024/cancel
+# 4) 任务状态 / 取消（换成别的 X-User-Id 会拿到 404：任务归属只认创建者）
+curl -H "X-User-Id: u1" http://localhost:8080/tender/tasks/1024
+curl -X POST -H "X-User-Id: u1" http://localhost:8080/tender/tasks/1024/cancel
 
 # 人员 + 企业资质并发匹配（tenderRequirementId 来自 /tender/parse/confirm）
 curl -X POST http://localhost:8080/tender/match \
   -H "Content-Type: application/json" \
+  -H "X-User-Id: u1" \
   -H "Idempotency-Key: $(uuidgen)" \
-  -d '{"userId":"u1","tenderRequirementId":1234567890}'
+  -d '{"tenderRequirementId":1234567890}'
 # {"taskId":2048,"type":"match","status":"running","eventsUrl":"/tender/tasks/2048/events"}
 
 # 订阅匹配事件流：与解析共用同一套任务接口，同样支持 Last-Event-ID 续传
-curl -N http://localhost:8080/tender/tasks/2048/events
-curl -N -H "Last-Event-ID: 5" http://localhost:8080/tender/tasks/2048/events
+curl -N -H "X-User-Id: u1" http://localhost:8080/tender/tasks/2048/events
+curl -N -H "X-User-Id: u1" -H "Last-Event-ID: 5" http://localhost:8080/tender/tasks/2048/events
 ```
 
 ## Langfuse 链路追踪

@@ -6,6 +6,7 @@ import type {
   TenderTaskView,
 } from '@/api/types'
 import { tenderApi } from '@/api/tender'
+import { identityHeaders } from '@/api/identity'
 import { newIdempotencyKey } from '@/utils/idempotency'
 import { streamSse } from './useSse'
 import { isAbortError, toErrorMessage } from '@/utils/async'
@@ -172,6 +173,8 @@ export function useTenderMatch() {
       try {
         await streamSse(tenderApi.taskEventsUrl(id, cursor), {
           method: 'GET',
+          // 与解析一致：订阅必须带身份，否则服务端按“不是你的任务”处理，回放不到事件
+          headers: identityHeaders(),
           signal: controller.value?.signal,
           onMessage: (data, message) => {
             const seq = Number(message.id)

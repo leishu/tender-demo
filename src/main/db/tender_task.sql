@@ -11,11 +11,14 @@
 --      进程内只保留“正在运行的任务 + 活跃订阅者”，任务结束即释放。
 --   3. (task_id, seq) 唯一：seq 在任务内单调递增，既做 SSE 的 id 字段，也做续传游标；
 --      重复写入会被数据库挡掉，避免回放时出现重复事件。
---   4. idempotency_key 唯一（可为 NULL，MySQL 唯一索引不约束多个 NULL）：
---      同一幂等键重复提交返回同一任务；对目录/章节这类结果可缓存的任务，
---      命中已完成的任务直接返回 result_json，不再调用模型。
+--   4. (user_id, idempotency_key) 唯一（idempotency_key 可为 NULL，MySQL 唯一索引不约束多个 NULL）：
+--      同一用户用同一幂等键重复提交返回同一任务；幂等键的作用域是用户，不同用户撞同一个键
+--      互不影响——全局唯一会让两个用户拿到对方的任务，既是串号也是越权。
+--      对目录/章节这类结果可缓存的任务，命中已完成的任务直接返回 result_json，不再调用模型。
 --   5. result_json 只保存“可缓存的最终结果”（目录 JSON、章节正文），
 --      解析任务的结果由事件本身承载，不回写这一列。
+--   6. 所属用户以 user_id 为准：taskId 是自增主键可被顺序枚举，
+--      所有按 id 的读/取消都必须带上调用者身份，见 TenderTaskService#requireOwned。
 --
 -- 执行：mysql -u root -p tender_demo < src/main/db/tender_task.sql
 -- =====================================================================
@@ -25,7 +28,7 @@ CREATE TABLE IF NOT EXISTS `t_tender_task` (
     `task_type`       VARCHAR(32)   NOT NULL                COMMENT '任务类型：parse/match/catalog/catalog_adjust/chapter',
     `status`          VARCHAR(16)   NOT NULL                COMMENT '任务状态：pending/running/succeeded/failed/cancelled',
     `user_id`         VARCHAR(128)  NOT NULL DEFAULT '__anon__' COMMENT '用户ID，匿名固定为 __anon__',
-    `idempotency_key` VARCHAR(191)  NULL                    COMMENT '幂等键；同一键重复提交返回同一任务',
+    `idempotency_key` VARCHAR(191)  NULL                    COMMENT '幂等键；同一用户内唯一，同键重复提交返回同一任务',
     `input_json`      LONGTEXT      NOT NULL                COMMENT '任务输入快照（JSON）',
     `result_json`     LONGTEXT      NULL                    COMMENT '可缓存的最终结果（目录/章节），解析任务为空',
     `error_message`   VARCHAR(1024) NULL                    COMMENT '失败或取消原因',
@@ -34,7 +37,7 @@ CREATE TABLE IF NOT EXISTS `t_tender_task` (
     `updated_at`      BIGINT        NOT NULL                COMMENT '更新时间(epoch ms)',
     `finished_at`     BIGINT        NULL                    COMMENT '进入终态的时间(epoch ms)',
     PRIMARY KEY (`id`),
-    UNIQUE KEY `uk_tender_task_idempotency` (`idempotency_key`),
+    UNIQUE KEY `uk_tender_task_user_idempotency` (`user_id`, `idempotency_key`),
     KEY `idx_tender_task_user` (`user_id`, `created_at`),
     KEY `idx_tender_task_status` (`status`, `updated_at`)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT = '招标任务（解析/目录/章节）';

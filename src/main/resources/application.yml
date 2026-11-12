@@ -66,6 +66,12 @@ agentscope:
 
 # 任务与事件（断线续传、结果缓存）
 tender:
+  # 调用者身份
+  auth:
+    # 是否允许用请求体 userId 充当调用者身份。请求体是客户端可控的，拿它当身份等于没有校验，
+    # 默认 true 只为本机演示直连方便；对外部署请设为 false，由网关注入 X-User-Id 请求头，
+    # 此时缺少该头一律 401（任务归属校验依赖这个身份）
+    allow-body-user-id: ${TENDER_AUTH_ALLOW_BODY_USER_ID:true}
   task:
     recovery:
       # 单实例保持 true：启动时把所有 pending/running 任务判定为中断。
