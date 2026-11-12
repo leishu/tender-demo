@@ -1,4 +1,4 @@
-import { client, unwrap } from './client'
+import { apiBaseUrl, client, unwrap } from './client'
 import type {
   CatalogAdjustRequest,
   CatalogRequest,
@@ -7,6 +7,8 @@ import type {
   ChapterRequest,
   TenderRequirements,
   TenderRequirementSummary,
+  TenderTaskCreated,
+  TenderTaskView,
 } from './types'
 import { withTimeout } from '@/utils/async'
 
@@ -27,6 +29,50 @@ export const tenderApi = {
   },
 
   /**
+   * 创建解析任务，立即返回 taskId；进度通过事件流订阅。
+   *
+   * 同一个 idempotencyKey 重复提交会返回同一个任务，不会重复调用模型。
+   */
+  async createParseTask(
+    body: TenderRequestBody,
+    signal?: AbortSignal,
+    idempotencyKey?: string,
+  ): Promise<TenderTaskCreated> {
+    const result = await client.POST('/tender/parse', {
+      body,
+      headers: idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined,
+      signal: withTimeout(signal, SHORT_TIMEOUT),
+    })
+    return unwrap<TenderTaskCreated>(result)
+  },
+
+  /**
+   * 任务事件流地址。lastEventId > 0 时从该序号之后续传，
+   * 与 SSE 的 Last-Event-ID 语义一致。
+   */
+  taskEventsUrl(taskId: number, lastEventId = 0): string {
+    const query = lastEventId > 0 ? `?lastEventId=${lastEventId}` : ''
+    return `${apiBaseUrl}/tender/tasks/${taskId}/events${query}`
+  },
+
+  /** 查询任务状态，用于事件流断开后判断任务是否仍在执行 */
+  async getTask(taskId: number, signal?: AbortSignal): Promise<TenderTaskView> {
+    const result = await client.GET('/tender/tasks/{taskId}', {
+      params: { path: { taskId } },
+      signal: withTimeout(signal, SHORT_TIMEOUT),
+    })
+    return unwrap<TenderTaskView>(result)
+  },
+
+  /** 取消任务：服务端会断开上游并落一条 error 事件，响应 204 无响应体 */
+  async cancelTask(taskId: number, signal?: AbortSignal): Promise<void> {
+    await client.POST('/tender/tasks/{taskId}/cancel', {
+      params: { path: { taskId } },
+      signal: withTimeout(signal, SHORT_TIMEOUT),
+    })
+  },
+
+  /**
    * 确认入库。传入 idempotencyKey 时，服务端同一 key 只会入库一次，
    * 重复点击/网络重试会拿回首次创建的主键，不会产生重复数据。
    */
@@ -43,17 +89,31 @@ export const tenderApi = {
     return unwrap<number>(result)
   },
 
-  async generateCatalog(body: CatalogRequest, signal?: AbortSignal): Promise<CatalogResult> {
+  /**
+   * 生成投标目录。传入 idempotencyKey 时，命中已完成的任务会直接返回缓存的目录，
+   * 不再调用模型（重试、重复点击不会白花一次模型调用）。
+   */
+  async generateCatalog(
+    body: CatalogRequest,
+    signal?: AbortSignal,
+    idempotencyKey?: string,
+  ): Promise<CatalogResult> {
     const result = await client.POST('/tender/catalog', {
       body,
+      headers: idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined,
       signal: withTimeout(signal, LONG_TIMEOUT),
     })
     return unwrap<CatalogResult>(result)
   },
 
-  async adjustCatalog(body: CatalogAdjustRequest, signal?: AbortSignal): Promise<CatalogResult> {
+  async adjustCatalog(
+    body: CatalogAdjustRequest,
+    signal?: AbortSignal,
+    idempotencyKey?: string,
+  ): Promise<CatalogResult> {
     const result = await client.POST('/tender/catalog/adjust', {
       body,
+      headers: idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined,
       signal: withTimeout(signal, LONG_TIMEOUT),
     })
     return unwrap<CatalogResult>(result)
@@ -75,11 +135,22 @@ export const tenderApi = {
     return unwrap<number>(result)
   },
 
-  async generateChapter(body: ChapterRequest, signal?: AbortSignal): Promise<string> {
+  async generateChapter(
+    body: ChapterRequest,
+    signal?: AbortSignal,
+    idempotencyKey?: string,
+  ): Promise<string> {
     const result = await client.POST('/tender/chapter', {
       body,
+      headers: idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined,
       signal: withTimeout(signal, LONG_TIMEOUT),
     })
     return unwrap<string>(result)
   },
+}
+
+/** 解析任务的请求体，与后端 TenderRequest 一致 */
+export interface TenderRequestBody {
+  userId?: string
+  tenderText: string
 }

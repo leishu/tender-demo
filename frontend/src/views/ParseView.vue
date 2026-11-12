@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Check, Close, Delete, Document, Refresh, VideoPlay } from '@element-plus/icons-vue'
@@ -8,6 +8,7 @@ import { SAMPLE_TENDER_TEXT } from '@/features/parse/sample'
 import { moduleLabel, useTenderParse } from '@/composables/useTenderParse'
 import { useAsyncTask } from '@/composables/useAsyncTask'
 import { tenderApi } from '@/api/tender'
+import { newIdempotencyKey } from '@/utils/idempotency'
 import { useWorkflowStore } from '@/stores/workflow'
 import type { ParseModule } from '@/api/types'
 
@@ -20,10 +21,12 @@ const {
   errorMessage,
   requirements,
   logs,
+  taskId,
   isRunning,
   hasData,
   counts,
   start,
+  resume,
   cancel,
   toRequirements,
 } = useTenderParse()
@@ -36,10 +39,29 @@ const { loading: confirmLoading, error: confirmError, run: runConfirm } = useAsy
  */
 let confirmIdempotencyKey: string | null = null
 
-function newIdempotencyKey(): string {
-  const uuid = globalThis.crypto?.randomUUID?.()
-  return uuid ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`
-}
+// 任务号落进工作流状态（sessionStorage）：刷新页面后据此回到事件流续看，而不是重新解析
+watch(taskId, (id) => {
+  workflow.setParseTaskId(id)
+})
+
+// 解析正常完成/取消后不再需要续看：清掉任务号，
+// 避免从目录页返回解析页时又回放一遍事件、覆盖用户手工改过的结果
+watch(status, (value) => {
+  if (value === 'done' || value === 'cancelled') {
+    workflow.setParseTaskId(null)
+  }
+})
+
+/**
+ * 页面刷新/切走回来时续看上一次的解析任务。
+ * 服务端会先回放已落库的事件再续实时流，不会重新调用模型。
+ */
+onMounted(async () => {
+  const saved = workflow.parseTaskId
+  if (saved) {
+    await resume(saved)
+  }
+})
 
 const step = computed(() => {
   if (workflow.tenderRequirementId) {
@@ -59,6 +81,7 @@ const statusLabel = computed(() => {
     idle: '待开始',
     connecting: '连接中',
     streaming: '解析中',
+    reconnecting: '重新连接中',
     done: '已完成',
     error: '失败',
     cancelled: '已取消',
@@ -73,7 +96,7 @@ const statusType = computed<'success' | 'warning' | 'info' | 'danger'>(() => {
   if (status.value === 'error') {
     return 'danger'
   }
-  if (status.value === 'streaming') {
+  if (status.value === 'streaming' || status.value === 'reconnecting') {
     return 'warning'
   }
   return 'info'
@@ -138,9 +161,12 @@ function formatClock(at: number) {
           粘贴招标文件正文，后端会通过 SSE 实时推送结构化要求。解析完成后可逐项修订，再确认入库。
         </p>
       </div>
-      <el-tag v-if="workflow.tenderRequirementId" type="success" effect="plain">
-        当前招标要求 #{{ workflow.tenderRequirementId }}
-      </el-tag>
+      <div class="header-actions">
+        <el-tag v-if="taskId" type="info" effect="plain" size="small">任务 #{{ taskId }}</el-tag>
+        <el-tag v-if="workflow.tenderRequirementId" type="success" effect="plain">
+          当前招标要求 #{{ workflow.tenderRequirementId }}
+        </el-tag>
+      </div>
     </div>
 
     <el-steps :active="step" finish-status="success" simple class="steps">
@@ -222,6 +248,14 @@ function formatClock(at: number) {
             v-if="errorMessage"
             :title="errorMessage"
             type="error"
+            show-icon
+            :closable="false"
+            class="mb"
+          />
+          <el-alert
+            v-else-if="status === 'reconnecting'"
+            title="与解析服务的连接已断开，正在从断点续传；已解析出来的内容不会丢失"
+            type="warning"
             show-icon
             :closable="false"
             class="mb"

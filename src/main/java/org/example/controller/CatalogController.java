@@ -12,6 +12,8 @@ import org.example.catalog.model.req.CatalogSaveRequest;
 import org.example.catalog.prompt.CatalogPromptProvider;
 import org.example.catalog.service.BidCatalogService;
 import org.example.catalog.service.CatalogGenerationService;
+import org.example.task.model.TaskType;
+import org.example.task.service.TenderTaskService;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.server.ResponseStatusException;
@@ -27,13 +29,16 @@ public class CatalogController {
     private final CatalogPromptProvider catalogPromptProvider;
     private final CatalogGenerationService catalogGenerationService;
     private final BidCatalogService bidCatalogService;
+    private final TenderTaskService taskService;
 
     public CatalogController(CatalogPromptProvider catalogPromptProvider,
                              BidCatalogService bidCatalogService,
-                             CatalogGenerationService catalogGenerationService) {
+                             CatalogGenerationService catalogGenerationService,
+                             TenderTaskService taskService) {
         this.catalogPromptProvider = catalogPromptProvider;
         this.bidCatalogService = bidCatalogService;
         this.catalogGenerationService = catalogGenerationService;
+        this.taskService = taskService;
     }
 
 
@@ -57,11 +62,24 @@ public class CatalogController {
                       超出列宽时截断，因此编号写错或文本略长不会再触发重新生成。
                     - 仍不合法（JSON 无法解析、标题为空、层级被压平等）时，把失败原因回传模型重新生成一次；
                       重试后仍失败返回 502 Bad Gateway。
+
+                    ### 幂等（结果缓存）
+                    可携带 `Idempotency-Key` 请求头。同一 key 命中已完成的任务时**直接返回缓存的目录**，
+                    不再调用模型；命中执行中的任务返回 409 Conflict。
+                    失败后重试同一个 key 会复用原任务重跑，不会新建任务。
                     """)
     @PostMapping("/catalog")
-    public Mono<CatalogResult> generateCatalog(@RequestBody CatalogRequest request) {
-        return catalogGenerationService.generate(request.getUserId(),
-                catalogPromptProvider.render(request.getTenderRequirementId()));
+    public Mono<CatalogResult> generateCatalog(
+            @RequestBody CatalogRequest request,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey) {
+        // 提示词在真正调用模型时才渲染：命中缓存时连提示词都不必拼
+        return taskService.runOnce(TaskType.CATALOG,
+                request.getUserId(),
+                idempotencyKey,
+                request,
+                CatalogResult.class,
+                () -> catalogGenerationService.generate(request.getUserId(),
+                        catalogPromptProvider.render(request.getTenderRequirementId())));
     }
 
     @Operation(summary = "调整投标目录",
@@ -85,9 +103,15 @@ public class CatalogController {
                       超出列宽时截断，因此编号写错或文本略长不会再触发重新生成。
                     - 仍不合法（JSON 无法解析、标题为空、层级被压平等）时，把失败原因回传模型重新生成一次；
                       重试后仍失败返回 502 Bad Gateway。
+
+                    ### 幂等（结果缓存）
+                    可携带 `Idempotency-Key` 请求头。同一 key 命中已完成的任务时直接返回缓存的目录，
+                    不再调用模型；命中执行中的任务返回 409 Conflict。
                     """)
     @PostMapping("/catalog/adjust")
-    public Mono<CatalogResult> adjustCatalog(@RequestBody CatalogAdjustRequest request) {
+    public Mono<CatalogResult> adjustCatalog(
+            @RequestBody CatalogAdjustRequest request,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey) {
         if (request.getPreviousCatalog() == null) {
             return Mono.error(new ResponseStatusException(
                     HttpStatus.BAD_REQUEST, "上一轮生成的目录 previousCatalog 不能为空"));
@@ -96,9 +120,15 @@ public class CatalogController {
             return Mono.error(new ResponseStatusException(
                     HttpStatus.BAD_REQUEST, "用户调整要求 customPrompt 不能为空"));
         }
-        return catalogGenerationService.generate(request.getUserId(),
-                adjustmentBlocks(catalogPromptProvider.renderAdjustment(request.getTenderRequirementId(),
-                        request.getPreviousCatalog(), request.getCustomPrompt())));
+        return taskService.runOnce(TaskType.CATALOG_ADJUST,
+                request.getUserId(),
+                idempotencyKey,
+                request,
+                CatalogResult.class,
+                () -> catalogGenerationService.generate(request.getUserId(),
+                        adjustmentBlocks(catalogPromptProvider.renderAdjustment(
+                                request.getTenderRequirementId(),
+                                request.getPreviousCatalog(), request.getCustomPrompt()))));
     }
 
     @Operation(summary = "获取已保存的投标目录",

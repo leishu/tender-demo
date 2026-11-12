@@ -10,6 +10,8 @@ interface PersistedState {
   requirements: TenderRequirements | null
   catalogResult: CatalogResult | null
   catalogRunId: number | null
+  /** 最近一次解析任务ID：刷新页面后据此回到事件流续看，不必重新解析 */
+  parseTaskId: number | null
 }
 
 function emptyState(): PersistedState {
@@ -18,6 +20,7 @@ function emptyState(): PersistedState {
     requirements: null,
     catalogResult: null,
     catalogRunId: null,
+    parseTaskId: null,
   }
 }
 
@@ -59,6 +62,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
   const requirements = ref<TenderRequirements | null>(initial.requirements)
   const catalogResult = ref<CatalogResult | null>(initial.catalogResult)
   const catalogRunId = ref<number | null>(initial.catalogRunId)
+  const parseTaskId = ref<number | null>(initial.parseTaskId)
   const sessionKey = ref(0)
 
   const hasRequirement = computed(() => tenderRequirementId.value !== null)
@@ -80,11 +84,16 @@ export const useWorkflowStore = defineStore('workflow', () => {
     catalogRunId.value = id
   }
 
+  function setParseTaskId(id: number | null) {
+    parseTaskId.value = id
+  }
+
   function clearParsed() {
     tenderRequirementId.value = null
     requirements.value = null
     catalogResult.value = null
     catalogRunId.value = null
+    parseTaskId.value = null
   }
 
   function reset() {
@@ -98,13 +107,14 @@ export const useWorkflowStore = defineStore('workflow', () => {
   }
 
   watch(
-    [tenderRequirementId, requirements, catalogResult, catalogRunId],
+    [tenderRequirementId, requirements, catalogResult, catalogRunId, parseTaskId],
     () => {
       const state: PersistedState = {
         tenderRequirementId: tenderRequirementId.value,
         requirements: requirements.value,
         catalogResult: catalogResult.value,
         catalogRunId: catalogRunId.value,
+        parseTaskId: parseTaskId.value,
       }
       try {
         sessionStorage.setItem(STORAGE_KEY, JSON.stringify(state))
@@ -121,6 +131,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
     requirements,
     catalogResult,
     catalogRunId,
+    parseTaskId,
     sessionKey,
     hasRequirement,
     hasCatalog,
@@ -128,6 +139,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
     setRequirements,
     setCatalogResult,
     setCatalogRunId,
+    setParseTaskId,
     clearParsed,
     reset,
   }

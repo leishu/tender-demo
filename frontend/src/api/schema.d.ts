@@ -165,6 +165,29 @@ type MatchEvent = {
   message?: string
 }
 
+type TaskType = 'parse' | 'catalog' | 'catalog_adjust' | 'chapter'
+
+type TaskStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled'
+
+type TenderTaskCreated = {
+  taskId?: number
+  type?: TaskType
+  status?: TaskStatus
+  eventsUrl?: string
+}
+
+type TenderTaskView = {
+  taskId?: number
+  type?: TaskType
+  status?: TaskStatus
+  lastEventId?: number
+  errorMessage?: string
+  result?: unknown
+  createdAt?: number
+  updatedAt?: number
+  finishedAt?: number
+}
+
 export interface paths {
   '/tender/parse': {
     post: {
@@ -174,10 +197,59 @@ export interface paths {
         }
       }
       responses: {
+        202: {
+          content: {
+            'application/json': components['schemas']['TenderTaskCreated']
+          }
+        }
+      }
+    }
+  }
+  '/tender/tasks/{taskId}': {
+    get: {
+      parameters: {
+        path: {
+          taskId: number
+        }
+      }
+      responses: {
+        200: {
+          content: {
+            'application/json': components['schemas']['TenderTaskView']
+          }
+        }
+      }
+    }
+  }
+  '/tender/tasks/{taskId}/events': {
+    get: {
+      parameters: {
+        path: {
+          taskId: number
+        }
+        query?: {
+          lastEventId?: number
+        }
+      }
+      responses: {
         200: {
           content: {
             'text/event-stream': components['schemas']['TenderParseEvent']
           }
+        }
+      }
+    }
+  }
+  '/tender/tasks/{taskId}/cancel': {
+    post: {
+      parameters: {
+        path: {
+          taskId: number
+        }
+      }
+      responses: {
+        204: {
+          content?: never
         }
       }
     }
@@ -356,6 +428,9 @@ export interface components {
       userId?: string
       tenderText?: string
     }
+    TenderTaskCreated: TenderTaskCreated
+    TenderTaskView: TenderTaskView
+    TaskStatus: TaskStatus
     TenderParseEvent: {
       module?: string
       data?: unknown

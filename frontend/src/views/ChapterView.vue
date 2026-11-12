@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { CopyDocument, MagicStick } from '@element-plus/icons-vue'
 import { useAsyncTask } from '@/composables/useAsyncTask'
 import { tenderApi } from '@/api/tender'
+import { newIdempotencyKey } from '@/utils/idempotency'
 import { useWorkflowStore } from '@/stores/workflow'
 import type { CatalogNode } from '@/api/types'
 
@@ -13,6 +14,16 @@ const { loading, error, run, cancel } = useAsyncTask()
 const chapterTitle = ref('')
 const scoringPointIds = ref<string[]>([])
 const content = ref('')
+
+/**
+ * 幂等键：同一章节 + 同一评分点组合内保持不变。
+ * 失败重试会命中同一任务，不重复调用模型；改动章节或评分点后自动换新键。
+ */
+let chapterKey: string | null = null
+
+watch([chapterTitle, scoringPointIds], () => {
+  chapterKey = null
+})
 
 function flatten(nodes: CatalogNode[] | undefined, acc: CatalogNode[] = []): CatalogNode[] {
   for (const node of nodes ?? []) {
@@ -66,6 +77,8 @@ async function generate() {
     ElMessage.warning('请先填写章节标题')
     return
   }
+  const key = chapterKey ?? newIdempotencyKey('chapter')
+  chapterKey = key
   const result = await run((signal) =>
     tenderApi.generateChapter(
       {
@@ -74,11 +87,14 @@ async function generate() {
         scoringPointIds: scoringPointIds.value.join(','),
       },
       signal,
+      key,
     ),
   )
   if (result === undefined) {
+    // 失败保留幂等键：下次点击是重试
     return
   }
+  chapterKey = null
   content.value = result
   ElMessage.success('章节生成完成')
 }

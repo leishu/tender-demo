@@ -6,6 +6,7 @@ import { Check, FolderOpened, MagicStick, View } from '@element-plus/icons-vue'
 import CatalogTree from '@/features/catalog/CatalogTree.vue'
 import { useAsyncTask } from '@/composables/useAsyncTask'
 import { tenderApi } from '@/api/tender'
+import { newIdempotencyKey } from '@/utils/idempotency'
 import { useWorkflowStore } from '@/stores/workflow'
 import type { CatalogNode } from '@/api/types'
 
@@ -27,6 +28,26 @@ const { loading: saveLoading, error: saveError, run: runSave } = useAsyncTask()
 const adjustPrompt = ref('')
 const activeTab = ref('merged')
 const jsonVisible = ref(false)
+
+/**
+ * 幂等键：一次生成/调整意图内保持不变。
+ * 请求失败时保留，重试会命中同一个任务（服务端已完成则直接返回缓存）而不重复调用模型；
+ * 成功后清空，下一次点击视为新的意图。
+ */
+let generateKey: string | null = null
+let adjustKey: string | null = null
+
+watch(adjustPrompt, () => {
+  adjustKey = null
+})
+
+watch(
+  () => workflow.tenderRequirementId,
+  () => {
+    generateKey = null
+    adjustKey = null
+  },
+)
 
 const catalogTabs = computed<CatalogTab[]>(() => {
   const result = workflow.catalogResult
@@ -76,15 +97,20 @@ async function generate() {
     return
   }
   resetErrors()
+  const key = generateKey ?? newIdempotencyKey('catalog')
+  generateKey = key
   const result = await runGenerate((signal) =>
     tenderApi.generateCatalog(
       { userId: workflow.userId, tenderRequirementId: requirementId },
       signal,
+      key,
     ),
   )
   if (!result) {
+    // 失败保留幂等键：下次点击是重试，命中同一任务
     return
   }
+  generateKey = null
   workflow.setCatalogResult(result)
   workflow.setCatalogRunId(null)
   ElMessage.success('目录生成完成')
@@ -113,6 +139,8 @@ async function adjust() {
     return
   }
   resetErrors()
+  const key = adjustKey ?? newIdempotencyKey('catalog-adjust')
+  adjustKey = key
   const result = await runAdjust((signal) =>
     tenderApi.adjustCatalog(
       {
@@ -122,11 +150,14 @@ async function adjust() {
         customPrompt: prompt,
       },
       signal,
+      key,
     ),
   )
   if (!result) {
+    // 失败保留幂等键：修改要求（watch adjustPrompt）或重试时才会换键
     return
   }
+  adjustKey = null
   workflow.setCatalogResult(result)
   workflow.setCatalogRunId(null)
   adjustPrompt.value = ''

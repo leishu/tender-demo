@@ -17,7 +17,17 @@
 
 ## 主要能力
 
-- **招标文件解析**：`POST /tender/parse`，以 SSE 实时推送 project / qualification / performance / personnel / scoringItem 等结构化事件。
+- **招标文件解析（任务化 + 断线续传）**：`POST /tender/parse` 只创建任务并立刻返回 `taskId`，
+  模型在后台执行；`GET /tender/tasks/{taskId}/events` 订阅事件流——先回放已落库的事件，再接实时事件，
+  断线带 `Last-Event-ID`（或 `?lastEventId=N`）即可续上，不会重复也不会遗漏。
+  `GET /tender/tasks/{taskId}` 查任务状态，`POST /tender/tasks/{taskId}/cancel` 取消并停止上游模型调用。
+- **幂等与结果缓存**：解析、目录生成/调整、章节撰写均支持 `Idempotency-Key` 请求头。同一键重复提交
+  复用同一个任务；目录/章节命中已完成的任务时直接返回缓存结果，不再调用模型。
+  服务重启时，重启前未完成的任务会被标记为失败并补一条 `error` 事件，已产出的事件仍可回放。
+- **任务自愈与租约**：执行中的任务会周期性刷新 `updated_at`；超过 `TENDER_TASK_STALE_MINUTES`
+  （默认 10 分钟）没有更新的任务由定时扫描回收，客户端断开或进程崩溃不会让任务永久停在 `running`。
+  单实例部署保持 `TENDER_TASK_RECOVERY_ASSUME_EXCLUSIVE_STARTUP=true`；多实例/滚动发布必须设为 `false`，
+  否则重启的实例会误判其它实例正在执行的任务。
 - **解析结果入库**：`POST /tender/parse/confirm`，主表 + 资质/业绩/人员/评分点四张子表持久化。
 - **已解析文件列表**：`GET /tender/requirements`，返回已入库招标要求的项目概况、各类要求条数与是否已生成目录，
   支持按项目名称模糊搜索（`keyword`）与条数上限（`limit`，默认 50、最大 200）。
@@ -50,6 +60,7 @@ mysql -u root -p tender_demo < src/main/db/enterprise_data.sql
 mysql -u root -p tender_demo < src/main/db/knowledge_base.sql
 mysql -u root -p tender_demo < src/main/db/bid_catalog.sql
 mysql -u root -p tender_demo < src/main/db/agent_state.sql
+mysql -u root -p tender_demo < src/main/db/tender_task.sql
 ```
 
 企业资质与人员的测试数据（可选，仅测试环境使用，会先清空这四张表）：
@@ -110,10 +121,23 @@ mvn spring-boot:run
 ### 6. 调用示例
 
 ```bash
-curl -N -X POST http://localhost:8080/tender/parse \
+# 1) 创建解析任务：立即返回 taskId（幂等键可选，重复提交返回同一任务，不重复调用模型）
+curl -X POST http://localhost:8080/tender/parse \
   -H "Content-Type: application/json" \
-  -H "Accept: text/event-stream" \
+  -H "Idempotency-Key: $(uuidgen)" \
   -d '{"userId":"u1","tenderText":"……招标文件正文……"}'
+# {"taskId":1024,"type":"parse","status":"running","eventsUrl":"/tender/tasks/1024/events"}
+
+# 2) 订阅事件流：先回放已落库事件，再接实时事件
+curl -N http://localhost:8080/tender/tasks/1024/events
+
+# 3) 断线续传：把已收到的最后一条 id 带上，只补发缺失的一段
+curl -N -H "Last-Event-ID: 7" http://localhost:8080/tender/tasks/1024/events
+curl -N "http://localhost:8080/tender/tasks/1024/events?lastEventId=7"
+
+# 4) 任务状态 / 取消
+curl http://localhost:8080/tender/tasks/1024
+curl -X POST http://localhost:8080/tender/tasks/1024/cancel
 
 # 人员 + 企业资质并发匹配（tenderRequirementId 来自 /tender/parse/confirm）
 curl -N -X POST http://localhost:8080/tender/match \
@@ -189,7 +213,8 @@ pnpm dev
 
 ```
 src/main/java/org/example
-├── controller/   # TenderController、MatchingController、KnowledgeBaseController
+├── controller/   # TenderController、CatalogController、MatchingController、KnowledgeBaseController
+├── task/         # 任务与事件持久化：建任务、事件落库与回放、断线续传、结果缓存
 ├── matching/     # 人员/企业资质匹配编排、SSE 事件转换与匹配模型
 ├── service/      # 解析事件转换、解析结果持久化、知识库、工作区初始化
 ├── repo/         # 仓储层（MyBatis-Plus + ES 检索）

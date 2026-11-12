@@ -64,6 +64,21 @@ agentscope:
     cron: "${AGENTSCOPE_SESSION_CLEANUP_CRON:0 30 3 * * *}"
 
 
+# 任务与事件（断线续传、结果缓存）
+tender:
+  task:
+    recovery:
+      # 单实例保持 true：启动时把所有 pending/running 任务判定为中断。
+      # 多实例/滚动发布必须设为 false，否则重启的实例会误杀其它实例正在执行的任务。
+      assume-exclusive-startup: ${TENDER_TASK_RECOVERY_ASSUME_EXCLUSIVE_STARTUP:true}
+      # 执行中任务超过该时长没有更新视为陈旧；<=0 关闭陈旧回收
+      stale-minutes: ${TENDER_TASK_STALE_MINUTES:10}
+      # 陈旧任务扫描间隔（毫秒）
+      scan-interval-ms: ${TENDER_TASK_RECOVERY_SCAN_INTERVAL_MS:60000}
+    # 同步任务（目录/章节）执行期间的心跳间隔（毫秒）；<=0 关闭
+    heartbeat-ms: ${TENDER_TASK_HEARTBEAT_MS:30000}
+
+
 # 人员/企业资质匹配
 matching:
   # 首轮缺少结果或流失败时，只对缺失的 requirementId 自动补跑的最大次数；0 表示关闭
