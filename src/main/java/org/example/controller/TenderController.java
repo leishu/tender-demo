@@ -21,6 +21,7 @@ import org.example.task.model.dto.TenderTaskCreated;
 import org.example.task.model.dto.TenderTaskView;
 import org.example.task.service.TenderTaskService;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.codec.ServerSentEvent;
@@ -37,6 +38,7 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 
+import java.time.Duration;
 import java.util.List;
 
 @Tag(name = "招标文件解析与投标生成")
@@ -44,12 +46,24 @@ import java.util.List;
 @RequestMapping("/tender")
 public class TenderController {
 
+    /** 保活注释帧：序列化为 {@code : ping} 加一个空行，不带 id/event/data */
+    private static final ServerSentEvent<String> KEEP_ALIVE =
+            ServerSentEvent.<String>builder().comment("ping").build();
+
     private final ObjectProvider<HarnessAgent.Builder> builderProvider;
     private final TenderRequirementsService requirementService;
     private final RuntimeContextBuilder contextBuilder;
     private final IdempotencyStore idempotencyStore;
     private final TenderTaskService taskService;
     private final CallerIdentity callerIdentity;
+
+    /**
+     * SSE 保活间隔（毫秒）；{@code <= 0} 关闭。
+     *
+     * <p>配置项而不是常量：不同网关的空闲超时不一样，需要按部署环境调整。</p>
+     */
+    @Value("${tender.task.sse-keep-alive-ms:30000}")
+    private long sseKeepAliveMs;
 
     public TenderController(ObjectProvider<HarnessAgent.Builder> builderProvider,
                             TenderRequirementsService requirementService,
@@ -125,6 +139,9 @@ public class TenderController {
                     - 每条 `data` 统一为 `{"module":"<模块名>","data":{...}}`，与改造前一致。
                     - 任务结束时会推送 `completed`（成功）或 `error`（失败/取消）后关闭连接；
                       若任务已结束，回放完历史事件即关闭。
+                    - 空闲时每 30s 发一条 `: ping` 注释帧保活（间隔可配 `tender.task.sse-keep-alive-ms`，
+                      `<= 0` 关闭）。注释帧不带 `id`，不影响 `Last-Event-ID` 续传游标，客户端按
+                      SSE 协议直接忽略即可。
 
                     ### data 结构（解析任务，按 module 分派）
                     | module | 说明 | data 关键字段 |
@@ -160,8 +177,9 @@ public class TenderController {
         int cursor = resolveCursor(lastEventId, lastEventIdHeader);
         // SSE 没有请求体，身份只能来自请求头；本地调试省略时按匿名处理
         String callerId = callerIdentity.resolve(userHeader, null);
-        return taskService.stream(taskId, cursor, callerId)
-                .map(TenderController::toServerSentEvent)
+        return withKeepAlive(
+                taskService.stream(taskId, cursor, callerId).map(TenderController::toServerSentEvent),
+                sseKeepAliveMs)
                 .subscribeOn(Schedulers.boundedElastic());
     }
 
@@ -302,6 +320,36 @@ public class TenderController {
                 .event(event.eventType())
                 .data(event.payload())
                 .build();
+    }
+
+    /**
+     * 给事件流挂上保活帧。
+     *
+     * <p>匹配任务的首条结果可能要等几分钟，期间一条帧都不发，中间代理很容易按空闲超时把连接
+     * 掐掉。定期写一条 {@code : ping} 注释帧成本几乎为零，却让连接上始终有字节流动。</p>
+     *
+     * <p>三点约束：</p>
+     * <ul>
+     *   <li>注释帧不带 {@code id}：SSE 的续传游标只在收到 {@code id} 字段时更新，
+     *       保活帧不该把 {@code Last-Event-ID} 冲成空值或重复值；</li>
+     *   <li>注释帧不带 {@code event}/{@code data}：按协议客户端会直接丢弃，
+     *       不会误触业务分支（前端解析器收到空 data 也会提前 return）；</li>
+     *   <li>保活随事件流一起结束：{@code takeUntilOther} 盯的是同一份 {@code shared} 的终止信号，
+     *       任务收尾时整条流立刻关闭，不会留下空转的定时器或一条永不结束的连接。</li>
+     * </ul>
+     *
+     * @param intervalMs 保活间隔；{@code <= 0} 表示关闭保活，原样返回
+     */
+    static Flux<ServerSentEvent<String>> withKeepAlive(Flux<ServerSentEvent<String>> events, long intervalMs) {
+        if (intervalMs <= 0) {
+            return events;
+        }
+        // publish(Function) 让“事件”与“终止信号”共用同一次上游订阅：hub 只被订阅一次，
+        // 不会因为加了保活就多注册一个 listener、多读一遍回放
+        return events.publish(shared -> shared.mergeWith(
+                Flux.interval(Duration.ofMillis(intervalMs))
+                        .map(tick -> KEEP_ALIVE)
+                        .takeUntilOther(shared.ignoreElements())));
     }
 
     /** 续传游标：查询参数与 Last-Event-ID 取较大值，缺省从头回放 */

@@ -84,6 +84,10 @@ tender:
     # 执行中任务的心跳间隔（毫秒）；<=0 关闭。同步任务（目录/章节）与流式任务
     # （解析/匹配，长时间没有事件时）都会按该间隔刷新 updated_at
     heartbeat-ms: ${TENDER_TASK_HEARTBEAT_MS:30000}
+    # SSE 保活注释帧（`: ping`）间隔（毫秒）；<=0 关闭。
+    # 匹配首条结果前可能几分钟没有事件，中间代理会按空闲超时断流；定期发一条注释帧即可。
+    # 需小于网关/Nginx 的 proxy_read_timeout，常见配置为 60s，故默认 30s
+    sse-keep-alive-ms: ${TENDER_TASK_SSE_KEEP_ALIVE_MS:30000}
 
 
 # 人员/企业资质匹配

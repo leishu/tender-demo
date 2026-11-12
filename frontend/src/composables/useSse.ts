@@ -43,6 +43,11 @@ export async function streamSse(url: string, options: SseRequestOptions): Promis
         throw new Error(text || `SSE 连接失败（HTTP ${response.status}）`)
       },
       onmessage(message) {
+        // 保活注释帧（服务端每 30s 一条 `: ping`）会以空 data 到达，直接丢弃：
+        // 业务侧不必再对空串做防御，也不该因此触发任何状态变更
+        if (!message.data) {
+          return
+        }
         options.onMessage(message.data, message)
       },
       onclose() {
