@@ -33,6 +33,15 @@ public class TenderTaskRecord {
     /** 幂等键，可为空；非空时全局唯一 */
     private String idempotencyKey;
 
+    /**
+     * 本次任务使用的 Agent 会话 ID，由服务端签发。
+     *
+     * <p>客户端要续写同一段会话就把上次返回的值原样传回来；不传则由服务端新建。
+     * 存在任务行上，是为了幂等命中时能把「原任务用的那个会话」回给客户端，
+     * 而不是再发一个新的（那样客户端存下来的 ID 会指向一段空会话）。</p>
+     */
+    private String sessionId;
+
     /** 任务输入快照（JSON），用于失败重跑与问题追溯 */
     private String inputJson;
 
@@ -42,7 +51,7 @@ public class TenderTaskRecord {
     /** 失败或取消原因 */
     private String errorMessage;
 
-    /** 已落库的最大事件序号，0 表示尚无事件 */
+    /** 已落库的最大事件序号（进度缓存，可能滞后）；续传游标请取事件表 maxSeq */
     private Integer lastEventSeq;
 
     /** 创建时间（epoch 毫秒） */

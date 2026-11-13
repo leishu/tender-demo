@@ -15,10 +15,12 @@ import org.example.task.model.TaskStatus;
 import org.example.task.model.TaskType;
 import org.example.task.model.TenderTaskRecord;
 import org.example.task.model.dto.TaskEvent;
+import org.example.task.model.dto.TaskExecution;
 import org.example.task.model.dto.TenderTaskCreated;
 import org.example.task.model.dto.TenderTaskView;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.dao.DataAccessException;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -110,6 +112,14 @@ public class TenderTaskService {
     @Value("${tender.task.heartbeat-ms:30000}")
     private long heartbeatMillis;
 
+    /** 单用户同时执行中的任务上限；<=0 关闭 */
+    @Value("${tender.task.limit.max-running-per-user:3}")
+    private int maxRunningPerUser;
+
+    /** 全实例同时执行中的任务上限；<=0 关闭 */
+    @Value("${tender.task.limit.max-running-total:20}")
+    private int maxRunningTotal;
+
     public TenderTaskService(TenderTaskMapper taskMapper,
                              TenderTaskEventHub hub,
                              ObjectProvider<HarnessAgent.Builder> builderProvider,
@@ -142,9 +152,12 @@ public class TenderTaskService {
         if (request.getTenderText() == null || request.getTenderText().isBlank()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "招标文件文本 tenderText 不能为空");
         }
+        // 会话 ID 在落任务行之前定下来：非法回传值直接 400；不传则由服务端签发。
+        // 必须在建任务前拿到具体值，否则响应里没有 ID 可回给客户端，下次就续不上
+        String sessionId = contextBuilder.resolveSessionId(request.getSessionId());
         String owner = CallerIdentity.normalize(callerId);
         return createStreamingTask(TaskType.PARSE, owner, idempotencyKey, request,
-                parseStream(request.getTenderText(), owner));
+                parseStream(request.getTenderText(), owner, sessionId));
     }
 
     /**
@@ -153,9 +166,10 @@ public class TenderTaskService {
      * <p>{@link Flux#defer} 保证上下文构建、Agent 构建都发生在订阅时；幂等命中或参数校验失败
      * 时不会白白建一次 Agent（更不会调用模型）。</p>
      */
-    private TaskStream parseStream(String tenderText, String userId) {
+    private TaskStream parseStream(String tenderText, String userId, String sessionId) {
         Flux<TaskStreamEvent> events = Flux.defer(() -> {
-            RuntimeContext ctx = contextBuilder.build(userId);
+            // sessionId 已由 createParseTask 定好：要么是客户端回传的旧会话，要么是刚签发的新会话
+            RuntimeContext ctx = contextBuilder.build(userId, sessionId);
             UserMessage prompt = new UserMessage("请解析以下招标文件，提取结构化要求：\n" + tenderText);
             HarnessAgent.Builder builder = builderProvider.getObject();
             return Flux.using(
@@ -166,7 +180,7 @@ public class TenderTaskService {
                     .map(event -> new TaskStreamEvent(event.getModule().getCode(), event, event.getMessage()));
         });
         // 解析的 error 只作终止原因：不随流落库，等任务层抢到终态后再写
-        return new TaskStream(events, false);
+        return new TaskStream(events, false, sessionId);
     }
 
     /**
@@ -188,11 +202,13 @@ public class TenderTaskService {
                 requireSameType(existing, type);
                 log.info("命中幂等键，复用已有任务: type={}, user={}, key={}, taskId={}, status={}",
                         type.getCode(), owner, key, existing.getId(), existing.getStatus());
-                return toCreated(existing);
+                return toCreated(ensureSessionId(existing));
             }
         }
 
-        TenderTaskRecord task = newTask(type, owner, key, input);
+        // 并发准入：先确认不超限再建行。幂等命中在上一步已经短路，重发不会重复占名额
+        requireCapacity(owner, type);
+        TenderTaskRecord task = newTask(type, owner, key, input, stream.sessionId());
         try {
             taskMapper.insert(task);
         } catch (DuplicateKeyException e) {
@@ -202,7 +218,7 @@ public class TenderTaskService {
                 throw e;
             }
             requireSameType(existing, type);
-            return toCreated(existing);
+            return toCreated(ensureSessionId(existing));
         }
 
         hub.open(task.getId(), 0);
@@ -228,19 +244,30 @@ public class TenderTaskService {
         });
     }
 
-    /** 查询任务状态；不存在或不属于调用者时统一 404（不区分二者，避免枚举出他人任务是否存在） */
+    /**
+     * 查询任务状态；不存在或不属于调用者时统一 404（不区分二者，避免枚举出他人任务是否存在）
+     *
+     * <p>{@code lastEventId} 取事件表里的真实最大序号，而不是任务行上的
+     * {@code last_event_seq}：后者只是进度缓存，与事件入库是两条 SQL，崩溃窗口内会滞后，
+     * 拿它当续传游标会让客户端重放已经收到的事件。事件流断线重连是低频操作，
+     * 多一次带唯一键的查询换“游标一定不落后”，值得。</p>
+     */
     public TenderTaskView getTask(long taskId, String userId) {
         TenderTaskRecord task = requireOwned(taskId, userId);
         return new TenderTaskView(
                 task.getId(),
                 task.getTaskType(),
                 task.getStatus(),
-                task.getLastEventSeq() == null ? 0 : task.getLastEventSeq(),
+                // 同步任务（目录/章节）不写事件表，游标恒为 0
+                task.getTaskType() != null && task.getTaskType().isStreaming()
+                        ? hub.maxSeq(taskId)
+                        : 0,
                 task.getErrorMessage(),
                 readResult(task.getResultJson()),
                 task.getCreatedAt(),
                 task.getUpdatedAt(),
-                task.getFinishedAt());
+                task.getFinishedAt(),
+                task.getSessionId());
     }
 
     /**
@@ -320,8 +347,25 @@ public class TenderTaskService {
      */
     @PostConstruct
     public void recoverInterruptedTasks() {
+        warnOnCapacityWithoutStaleRecovery();
         long updatedBefore = assumeExclusiveStartup ? Long.MAX_VALUE : staleBefore();
         recoverTasks(updatedBefore, true);
+    }
+
+    /**
+     * 并发上限与陈旧回收的配置自洽检查。
+     *
+     * <p>{@code requireCapacity} 用“仍在租约内”定义“占名额”。陈旧回收关闭时
+     * （{@code stale-minutes<=0}），进程崩溃或断连留下的 {@code running} 行永远不会被判死，
+     * 名额只减不增，最终所有请求都是 429。关闭陈旧回收本身是文档允许的配置，
+     * 所以这里只告警不阻断启动：要么打开陈旧回收，要么把 {@code limit.*} 一并关掉。</p>
+     */
+    private void warnOnCapacityWithoutStaleRecovery() {
+        if ((maxRunningPerUser > 0 || maxRunningTotal > 0) && staleMinutes <= 0) {
+            log.warn("并发上限已开启，但陈旧任务回收被关闭（tender.task.recovery.stale-minutes<=0）："
+                    + "崩溃/断连留下的 running 任务会永久占用名额，配额将逐渐失效。"
+                    + "请开启陈旧回收，或把 tender.task.limit.* 设为 0");
+        }
     }
 
     /**
@@ -414,6 +458,69 @@ public class TenderTaskService {
                 : now() - Duration.ofMinutes(staleMinutes).toMillis();
     }
 
+    /**
+     * 这一行是否已超出租约。
+     *
+     * <p>只用于“接管重跑之前先占名额”这类需要提前判断的场景；真正的状态流转仍由
+     * {@code reopenStale} 的带条件 SQL 裁决，避免先查后写的竞态。</p>
+     */
+    private boolean isStale(TenderTaskRecord task) {
+        return staleMinutes > 0
+                && task.getUpdatedAt() != null
+                && task.getUpdatedAt() < staleBefore();
+    }
+
+    /**
+     * 并发准入：限制单个用户与全实例“同时执行中”的任务数。
+     *
+     * <p>一次解析/匹配会起 1~3 路模型调用，接口本身没有速率限制时，一个人连点几下就能把
+     * 线程与 token 预算打满，别人的请求只能排队等模型。这里在<b>建行/重跑之前</b>数一下还在跑的
+     * 任务，超限直接 429，把压力挡在模型调用之前。</p>
+     *
+     * <p>注意计数的单位是“任务”而不是“模型调用”：一个匹配任务会并发调度人员与资质两路子
+     * Agent，补跑还会更多。要按模型调用控制并发，得在 Agent 层做信号量，任务层看不到这个粒度。</p>
+     *
+     * <p>幂等命中缓存、命中的任务仍在执行（409）都不查名额；新建任务和“接管陈旧/重跑失败任务”
+     * 都会真正调一次模型，所以都要走这里。</p>
+     *
+     * <p>为什么查库而不是进程内计数器：任务本身是落库的，计数器在多实例、重启后会与真实状态
+     * 脱节，漏掉的名额只能等进程重启才回收。查库天然与陈旧回收共用同一套“什么是活着”的定义。
+     * 代价是并发请求之间存在很窄的竞态窗口（两个请求可能同时读到 N-1，各建一行），
+     * 所以这是<b>准入控制</b>而不是精确配额；要硬配额得加行锁或改用分布式信号量。</p>
+     *
+     * @throws ResponseStatusException 429，超限时拒绝建任务
+     */
+    private void requireCapacity(String owner, TaskType type) {
+        if (maxRunningPerUser <= 0 && maxRunningTotal <= 0) {
+            return;
+        }
+        // 与陈旧回收用同一个时间下界：超过租约没更新的行已经算死，不该继续占名额
+        long freshSince = staleBefore();
+        try {
+            if (maxRunningPerUser > 0) {
+                int mine = taskMapper.countRunningByUser(owner, freshSince);
+                if (mine >= maxRunningPerUser) {
+                    log.info("拒绝建任务：用户 {} 执行中任务已达上限 {}，type={}", owner, maxRunningPerUser,
+                            type.getCode());
+                    throw new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS,
+                            "同时执行中的任务过多（每人上限 " + maxRunningPerUser + " 个），请等待已有任务结束后重试");
+                }
+            }
+            if (maxRunningTotal > 0) {
+                int total = taskMapper.countRunning(freshSince);
+                if (total >= maxRunningTotal) {
+                    log.warn("拒绝建任务：全实例执行中任务已达上限 {}，user={}，type={}",
+                            maxRunningTotal, owner, type.getCode());
+                    throw new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS,
+                            "服务当前并发任务已达上限（" + maxRunningTotal + " 个），请稍后重试");
+                }
+            }
+        } catch (DataAccessException e) {
+            // 保护措施自己出问题（表未建、库抖动）不能把正常请求一起挡死
+            log.warn("并发准入查询失败，本次放行: {}", e.getMessage());
+        }
+    }
+
     // --------------------------------------------------------- 同步任务缓存
 
     /**
@@ -427,25 +534,34 @@ public class TenderTaskService {
      * </ul>
      *
      * <p>没有幂等键时退化为“每次都是新任务”，与原语义一致。</p>
+     *
+     * <p>{@code sessionId} 必须是已经定好的会话（客户端回传的旧会话，或调用方刚签发的新会话）：
+     * 本方法要把它写进任务行，并在响应里回给客户端，否则客户端下次续写就无处可查。
+     * 命中缓存时返回的是<b>原任务</b>的会话，不是本次传进来的这个——缓存结果属于那段对话。</p>
+     *
+     * @param action 真正调用模型的逻辑；调用方已把 {@code sessionId} 捕获进闭包
      */
-    public <T> Mono<T> runOnce(TaskType type,
-                               String userId,
-                               String idempotencyKey,
-                               Object input,
-                               Class<T> resultType,
-                               Supplier<Mono<T>> action) {
+    public <T> Mono<TaskExecution<T>> runOnce(TaskType type,
+                                              String userId,
+                                              String idempotencyKey,
+                                              Object input,
+                                              String sessionId,
+                                              Class<T> resultType,
+                                              Supplier<Mono<T>> action) {
         // 记录本次调用创建/复用的任务行，供取消回调落终态
         AtomicReference<TenderTaskRecord> taskRef = new AtomicReference<>();
 
         return Mono.fromCallable(() -> {
-                    Prepared<T> prepared = prepare(type, userId, idempotencyKey, input, resultType);
+                    Prepared<T> prepared = prepare(type, userId, idempotencyKey, input,
+                            sessionId, resultType);
                     taskRef.set(prepared.task());
                     return prepared;
                 })
                 .subscribeOn(Schedulers.boundedElastic())
                 .flatMap(prepared -> {
                     if (prepared.cached() != null) {
-                        return Mono.just(prepared.cached());
+                        return Mono.just(
+                                new TaskExecution<>(prepared.cached(), prepared.task().getSessionId()));
                     }
                     TenderTaskRecord task = prepared.task();
                     Mono<T> execution = action.get()
@@ -458,7 +574,8 @@ public class TenderTaskService {
                                     })
                                     .subscribeOn(Schedulers.boundedElastic())
                                     .then(Mono.error(error)));
-                    return withHeartbeat(task, execution);
+                    return withHeartbeat(task, execution)
+                            .map(value -> new TaskExecution<>(value, task.getSessionId()));
                 })
                 // 客户端断开/请求超时会取消整条链，onErrorResume 不会触发；
                 // 这里异步落 cancelled，避免任务永久停在 running、幂等键被一直占用
@@ -701,7 +818,7 @@ public class TenderTaskService {
 
     /** 幂等判定：命中缓存 / 正在执行 / 需要重跑 / 新建，全部在这里定下来（阻塞调用） */
     private <T> Prepared<T> prepare(TaskType type, String userId, String idempotencyKey,
-                                    Object input, Class<T> resultType) {
+                                    Object input, String sessionId, Class<T> resultType) {
         String owner = CallerIdentity.normalize(userId);
         String key = normalizeKey(idempotencyKey);
         if (key != null) {
@@ -711,28 +828,42 @@ public class TenderTaskService {
                 TaskStatus status = existing.getStatus();
                 if (status == TaskStatus.SUCCEEDED && existing.getResultJson() != null) {
                     log.info("命中已完成任务，直接返回缓存结果: taskId={}, key={}", existing.getId(), key);
-                    return new Prepared<>(existing, readResult(existing.getResultJson(), resultType));
+                    // 缓存属于原会话：把原会话回给客户端，而不是本次传进来的新会话
+                    return new Prepared<>(ensureSessionId(existing),
+                            readResult(existing.getResultJson(), resultType));
                 }
                 if (status == TaskStatus.RUNNING || status == TaskStatus.PENDING) {
                     // 客户端断开/进程崩溃可能留下永久 running 的任务；
                     // 超过租约时间没有更新就允许接管重跑，否则继续 409
-                    if (staleMinutes > 0
-                            && taskMapper.reopenStale(existing.getId(), now(), staleBefore()) > 0) {
-                        log.info("复用陈旧的执行中任务重跑: taskId={}, key={}", existing.getId(), key);
-                        existing.setStatus(TaskStatus.RUNNING);
-                        existing.setResultJson(null);
-                        existing.setErrorMessage(null);
-                        return new Prepared<>(existing, null);
+                    if (isStale(existing)) {
+                        // 接管陈旧任务等于重新跑一次模型，同样要占一个并发名额。
+                        // 必须在 reopen 之前数：reopen 之后这一行自己也会被计入，
+                        // 恰好等于上限时会被误拒，而且那时任务已被改回 running、却不会再执行。
+                        requireCapacity(owner, type);
+                        if (taskMapper.reopenStale(existing.getId(), now(), staleBefore()) > 0) {
+                            log.info("复用陈旧的执行中任务重跑: taskId={}, key={}",
+                                    existing.getId(), key);
+                            existing.setStatus(TaskStatus.RUNNING);
+                            existing.setResultJson(null);
+                            existing.setErrorMessage(null);
+                            // 重跑跑在本次的会话里（客户端可能换了会话），行随之更新
+                            applySessionId(existing, sessionId);
+                            return new Prepared<>(existing, null);
+                        }
                     }
                     throw new ResponseStatusException(HttpStatus.CONFLICT,
                             "相同幂等键的任务正在执行，请稍后重试");
                 }
-                // 失败/取消：复用同一行重跑，保持幂等键不被释放
+                // 失败/取消：复用同一行重跑，保持幂等键不被释放。
+                // 重跑同样是一次模型调用，照常受并发准入约束——否则攒几个失败任务并发重放
+                // 就能绕过上限，限额形同虚设。
+                requireCapacity(owner, type);
                 if (taskMapper.reopen(existing.getId(), now()) > 0) {
                     log.info("复用失败的幂等任务重跑: taskId={}, key={}", existing.getId(), key);
                     existing.setStatus(TaskStatus.RUNNING);
                     existing.setResultJson(null);
                     existing.setErrorMessage(null);
+                    applySessionId(existing, sessionId);
                     return new Prepared<>(existing, null);
                 }
                 throw new ResponseStatusException(HttpStatus.CONFLICT,
@@ -740,7 +871,10 @@ public class TenderTaskService {
             }
         }
 
-        TenderTaskRecord task = newTask(type, owner, key, input);
+        // 目录/章节每次也是一次模型调用，同样受并发准入约束；命中缓存、正在执行的 409
+        // 都不会走到这里，重跑路径已在上面各自占过名额
+        requireCapacity(owner, type);
+        TenderTaskRecord task = newTask(type, owner, key, input, sessionId);
         try {
             taskMapper.insert(task);
         } catch (DuplicateKeyException e) {
@@ -798,7 +932,7 @@ public class TenderTaskService {
     // ------------------------------------------------------------------ 工具
 
     private TenderTaskRecord newTask(TaskType type, String userId, String key,
-                                     Object input) {
+                                     Object input, String sessionId) {
         long now = now();
         TenderTaskRecord task = new TenderTaskRecord();
         task.setTaskType(type);
@@ -806,6 +940,7 @@ public class TenderTaskService {
         // 归属列必须与幂等作用域用同一个归一化结果，否则查得到 / 查不到会随调用路径漂移
         task.setUserId(CallerIdentity.normalize(userId));
         task.setIdempotencyKey(key);
+        task.setSessionId(sessionId);
         task.setInputJson(writeJson(input));
         task.setLastEventSeq(0);
         task.setCreatedAt(now);
@@ -814,7 +949,32 @@ public class TenderTaskService {
     }
 
     private TenderTaskCreated toCreated(TenderTaskRecord task) {
-        return new TenderTaskCreated(task.getId(), task.getTaskType(), task.getStatus(), eventsUrl(task.getId()));
+        return new TenderTaskCreated(task.getId(), task.getTaskType(), task.getStatus(),
+                eventsUrl(task.getId()), task.getSessionId());
+    }
+
+    /**
+     * 保证任务行上有会话 ID，返回同一个对象便于链式使用。
+     *
+     * <p>只对本次改造前创建的历史行生效：那些行没记会话，原对话已经无法定位，
+     * 补发一个新 ID 落库，至少让「响应里给出的 ID 一定能在任务行查到」成立。</p>
+     */
+    private TenderTaskRecord ensureSessionId(TenderTaskRecord task) {
+        if (task.getSessionId() == null || task.getSessionId().isBlank()) {
+            String generated = contextBuilder.resolveSessionId(null);
+            task.setSessionId(generated);
+            taskMapper.updateSessionId(task.getId(), generated);
+        }
+        return task;
+    }
+
+    /** 重跑时把本次会话写回任务行（客户端可能换了一段会话，不能沿用旧值） */
+    private void applySessionId(TenderTaskRecord task, String sessionId) {
+        if (sessionId == null || sessionId.equals(task.getSessionId())) {
+            return;
+        }
+        task.setSessionId(sessionId);
+        taskMapper.updateSessionId(task.getId(), sessionId);
     }
 
     /**

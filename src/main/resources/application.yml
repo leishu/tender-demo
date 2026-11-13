@@ -88,6 +88,16 @@ tender:
     # 匹配首条结果前可能几分钟没有事件，中间代理会按空闲超时断流；定期发一条注释帧即可。
     # 需小于网关/Nginx 的 proxy_read_timeout，常见配置为 60s，故默认 30s
     sse-keep-alive-ms: ${TENDER_TASK_SSE_KEEP_ALIVE_MS:30000}
+    # 并发准入：同时执行中的任务数上限，超限的建任务请求直接 429。
+    # 一次解析/匹配会起 1~3 路模型调用，没有上限时单个用户连点几下就能点满并发与 token 预算。
+    # 计数来自数据库（status 为 running 且仍在租约内），与陈旧回收共用“什么算还活着”的定义。<=0 关闭。
+    limit:
+      # 单用户上限；目录/章节这类同步任务同样计入。
+      # 单位是“任务”不是“模型调用”：一次 MATCH 会并发跑人员/资质两路子 Agent，
+      # 补跑（matching.max-retries）还会更多，所以 3 个匹配任务≈6 路以上的模型并发。
+      max-running-per-user: ${TENDER_TASK_MAX_RUNNING_PER_USER:3}
+      # 全实例上限。多实例部署时每个实例各自计数，全局硬配额需要分布式信号量或网关限流
+      max-running-total: ${TENDER_TASK_MAX_RUNNING_TOTAL:20}
 
 
 # 人员/企业资质匹配

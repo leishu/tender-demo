@@ -1,4 +1,4 @@
-import { apiBaseUrl, client, unwrap } from './client'
+import { apiBaseUrl, client, unwrap, unwrapWithSession, type ApiResponse } from './client'
 import type {
   CatalogAdjustRequest,
   CatalogRequest,
@@ -32,6 +32,7 @@ export const tenderApi = {
    * 创建解析任务，立即返回 taskId；进度通过事件流订阅。
    *
    * 同一个 idempotencyKey 重复提交会返回同一个任务，不会重复调用模型。
+   * 响应体里的 `sessionId` 是服务端为这段会话签发的 ID，续写时原样回传即可。
    */
   async createParseTask(
     body: TenderRequestBody,
@@ -50,7 +51,7 @@ export const tenderApi = {
    * 创建人员/资质匹配任务，立即返回 taskId；进度通过事件流订阅。
    *
    * 与解析任务同构：同一个 idempotencyKey 重复提交会返回同一个任务，
-   * 不会让两路子 Agent 再跑一遍。
+   * 不会让两路子 Agent 再跑一遍；`sessionId` 同理由服务端签发。
    */
   async createMatchTask(
     body: MatchRequestBody,
@@ -111,31 +112,34 @@ export const tenderApi = {
   /**
    * 生成投标目录。传入 idempotencyKey 时，命中已完成的任务会直接返回缓存的目录，
    * 不再调用模型（重试、重复点击不会白花一次模型调用）。
+   *
+   * 响应里带的会话 ID 由服务端签发：要接着这段会话做「自然语言调整」，就把它回传。
    */
   async generateCatalog(
     body: CatalogRequest,
     signal?: AbortSignal,
     idempotencyKey?: string,
-  ): Promise<CatalogResult> {
+  ): Promise<ApiResponse<CatalogResult>> {
     const result = await client.POST('/tender/catalog', {
       body,
       headers: idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined,
       signal: withTimeout(signal, LONG_TIMEOUT),
     })
-    return unwrap<CatalogResult>(result)
+    return unwrapWithSession<CatalogResult>(result)
   },
 
+  /** 在同一段会话里调整目录：回传生成时的 sessionId，模型才看得到上一轮目录 */
   async adjustCatalog(
     body: CatalogAdjustRequest,
     signal?: AbortSignal,
     idempotencyKey?: string,
-  ): Promise<CatalogResult> {
+  ): Promise<ApiResponse<CatalogResult>> {
     const result = await client.POST('/tender/catalog/adjust', {
       body,
       headers: idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined,
       signal: withTimeout(signal, LONG_TIMEOUT),
     })
-    return unwrap<CatalogResult>(result)
+    return unwrapWithSession<CatalogResult>(result)
   },
 
   async getCatalog(tenderRequirementId: number, signal?: AbortSignal): Promise<CatalogResult> {
@@ -154,28 +158,31 @@ export const tenderApi = {
     return unwrap<number>(result)
   },
 
+  /** 撰写章节；响应带的会话 ID 回传后，下一章能看到前文 */
   async generateChapter(
     body: ChapterRequest,
     signal?: AbortSignal,
     idempotencyKey?: string,
-  ): Promise<string> {
+  ): Promise<ApiResponse<string>> {
     const result = await client.POST('/tender/chapter', {
       body,
       headers: idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined,
       signal: withTimeout(signal, LONG_TIMEOUT),
     })
-    return unwrap<string>(result)
+    return unwrapWithSession<string>(result)
   },
 }
 
 /** 解析任务的请求体，与后端 TenderRequest 一致 */
 export interface TenderRequestBody {
   userId?: string
+  sessionId?: string
   tenderText: string
 }
 
 /** 匹配任务的请求体，与后端 MatchRequest 一致 */
 export interface MatchRequestBody {
   userId?: string
+  sessionId?: string
   tenderRequirementId: number
 }

@@ -13,9 +13,11 @@ import org.example.catalog.prompt.CatalogPromptProvider;
 import org.example.catalog.service.BidCatalogService;
 import org.example.catalog.service.CatalogGenerationService;
 import org.example.service.CallerIdentity;
+import org.example.service.RuntimeContextBuilder;
 import org.example.task.model.TaskType;
 import org.example.task.service.TenderTaskService;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.server.ResponseStatusException;
 import reactor.core.publisher.Mono;
@@ -32,17 +34,20 @@ public class CatalogController {
     private final BidCatalogService bidCatalogService;
     private final TenderTaskService taskService;
     private final CallerIdentity callerIdentity;
+    private final RuntimeContextBuilder contextBuilder;
 
     public CatalogController(CatalogPromptProvider catalogPromptProvider,
                              BidCatalogService bidCatalogService,
                              CatalogGenerationService catalogGenerationService,
                              TenderTaskService taskService,
-                             CallerIdentity callerIdentity) {
+                             CallerIdentity callerIdentity,
+                             RuntimeContextBuilder contextBuilder) {
         this.catalogPromptProvider = catalogPromptProvider;
         this.bidCatalogService = bidCatalogService;
         this.catalogGenerationService = catalogGenerationService;
         this.taskService = taskService;
         this.callerIdentity = callerIdentity;
+        this.contextBuilder = contextBuilder;
     }
 
 
@@ -53,6 +58,9 @@ public class CatalogController {
                     ### 请求体
                     - `userId`：用户ID（可选）
                     - `tenderRequirementId`：招标要求主键（必填）
+                    - `sessionId`：会话 ID（可选）。**只由服务端签发**：不传则由服务端新开一段会话，
+                      并把 ID 通过 `X-Session-Id` 响应头返回；要续写就把它原样回传。
+                      `/tender/catalog` 与 `/tender/catalog/adjust` 用同一个值即可让调整轮次直接看到上一轮目录
 
                     ### 响应说明
                     - `catalog`：合并目录，顶层为一级章节，子章节在 `children` 中，最多三级；商务/技术分列时为空
@@ -73,20 +81,25 @@ public class CatalogController {
                     失败后重试同一个 key 会复用原任务重跑，不会新建任务。不同用户撞同一个 key 互不影响。
                     """)
     @PostMapping("/catalog")
-    public Mono<CatalogResult> generateCatalog(
+    public Mono<ResponseEntity<CatalogResult>> generateCatalog(
             @RequestBody CatalogRequest request,
             @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
             @Parameter(description = "调用者身份（由网关注入；本地调试可省略）")
             @RequestHeader(value = CallerIdentity.USER_HEADER, required = false) String userHeader) {
         String callerId = callerIdentity.resolve(userHeader, request.getUserId());
+        // 会话 ID 在这里同步定下来：非法回传值直接 400，不传则签发新会话；
+        // 具体值写进任务行，并通过 X-Session-Id 响应头回给客户端
+        String sessionId = contextBuilder.resolveSessionId(request.getSessionId());
         // 提示词在真正调用模型时才渲染：命中缓存时连提示词都不必拼
         return taskService.runOnce(TaskType.CATALOG,
-                callerId,
-                idempotencyKey,
-                request,
-                CatalogResult.class,
-                () -> catalogGenerationService.generate(callerId,
-                        catalogPromptProvider.render(request.getTenderRequirementId())));
+                        callerId,
+                        idempotencyKey,
+                        request,
+                        sessionId,
+                        CatalogResult.class,
+                        () -> catalogGenerationService.generate(callerId, sessionId,
+                                catalogPromptProvider.render(request.getTenderRequirementId())))
+                .map(execution -> withSessionId(execution.value(), execution.sessionId()));
     }
 
     @Operation(summary = "调整投标目录",
@@ -98,6 +111,9 @@ public class CatalogController {
                     - `tenderRequirementId`：招标要求主键（必填）
                     - `previousCatalog`：上一轮生成的目录结果（必填），原样传入 `/tender/catalog` 或本接口上一轮的响应体
                     - `customPrompt`：用户调整要求（必填），如调整章节顺序、拆分/合并章节、改名、增删章节
+                    - `sessionId`：会话 ID（可选）。**只由服务端签发**：不传则新开一段会话，
+                      并把 ID 通过 `X-Session-Id` 响应头返回；要续写就把它原样回传，模型才能看到上一轮目录。
+                      客户端自造的值（非 `年-月-日-时-流水号` 形态）一律 400
 
                     ### 响应说明
                     与 `/tender/catalog` 一致：`catalog` 或 `businessCatalog` / `technicalCatalog`、`structureDecision`、`gaps`。
@@ -116,7 +132,7 @@ public class CatalogController {
                     缓存的目录，不再调用模型；命中执行中的任务返回 409 Conflict。
                     """)
     @PostMapping("/catalog/adjust")
-    public Mono<CatalogResult> adjustCatalog(
+    public Mono<ResponseEntity<CatalogResult>> adjustCatalog(
             @RequestBody CatalogAdjustRequest request,
             @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
             @Parameter(description = "调用者身份（由网关注入；本地调试可省略）")
@@ -130,15 +146,19 @@ public class CatalogController {
                     HttpStatus.BAD_REQUEST, "用户调整要求 customPrompt 不能为空"));
         }
         String callerId = callerIdentity.resolve(userHeader, request.getUserId());
+        // 与生成共用服务端下发的会话：把生成响应里的 X-Session-Id 原样传回来即可看到上一轮目录
+        String sessionId = contextBuilder.resolveSessionId(request.getSessionId());
         return taskService.runOnce(TaskType.CATALOG_ADJUST,
-                callerId,
-                idempotencyKey,
-                request,
-                CatalogResult.class,
-                () -> catalogGenerationService.generate(callerId,
-                        adjustmentBlocks(catalogPromptProvider.renderAdjustment(
-                                request.getTenderRequirementId(),
-                                request.getPreviousCatalog(), request.getCustomPrompt()))));
+                        callerId,
+                        idempotencyKey,
+                        request,
+                        sessionId,
+                        CatalogResult.class,
+                        () -> catalogGenerationService.generate(callerId, sessionId,
+                                adjustmentBlocks(catalogPromptProvider.renderAdjustment(
+                                        request.getTenderRequirementId(),
+                                        request.getPreviousCatalog(), request.getCustomPrompt()))))
+                .map(execution -> withSessionId(execution.value(), execution.sessionId()));
     }
 
     @Operation(summary = "获取已保存的投标目录",
@@ -209,5 +229,15 @@ public class CatalogController {
                 TextBlock.builder().text(prompt.rules()).build(),
                 TextBlock.builder().text(prompt.previousCatalog()).build(),
                 TextBlock.builder().text(prompt.customPrompt()).build());
+    }
+
+    /**
+     * 把业务结果与会话 ID 一起返回：会话走响应头，响应体保持原来的形状，
+     * 老客户端不受影响。
+     */
+    private static <T> ResponseEntity<T> withSessionId(T body, String sessionId) {
+        return ResponseEntity.ok()
+                .header(RuntimeContextBuilder.SESSION_HEADER, sessionId)
+                .body(body);
     }
 }

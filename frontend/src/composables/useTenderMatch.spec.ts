@@ -32,6 +32,11 @@ function newMatch() {
   return effectScope(true).run(() => useTenderMatch())!
 }
 
+/** 第 N 次建任务请求里携带的 sessionId */
+function sessionIdOf(callIndex: number): string | undefined {
+  return (mocks.createMatchTask.mock.calls[callIndex][0] as { sessionId?: string }).sessionId
+}
+
 /** 让事件流立刻推一条 completed 就结束，模拟任务正常收尾 */
 function completeImmediately() {
   mocks.streamSse.mockImplementation(
@@ -44,6 +49,7 @@ function completeImmediately() {
 describe('useTenderMatch 幂等键', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    sessionStorage.clear()
     mocks.getTask.mockRejectedValue(new Error('not found'))
     completeImmediately()
   })
@@ -83,6 +89,38 @@ describe('useTenderMatch 幂等键', () => {
     expect(keys[1]).toBe(pendingKey)
     expect(match.status.value).toBe('done')
     expect(match.idempotencyKey.value).toBeNull()
+  })
+
+  it('记住服务端签发的会话并原样回传，换一份招标则重新开一段', async () => {
+    mocks.createMatchTask
+      .mockResolvedValueOnce({ taskId: 1, sessionId: '2026-11-13-09-3' })
+      .mockResolvedValueOnce({ taskId: 2, sessionId: '2026-11-13-09-4' })
+      .mockResolvedValueOnce({ taskId: 3, sessionId: '2026-11-13-10-1' })
+
+    const match = newMatch()
+    await match.start(8, 'u1')
+    // 首次没有历史会话：不传，由服务端签发
+    expect(sessionIdOf(0)).toBeUndefined()
+
+    await match.start(8, 'u1')
+    // 同一份招标的匹配续写：回传服务端上次给的 ID
+    expect(sessionIdOf(1)).toBe('2026-11-13-09-3')
+
+    await match.start(9, 'u1')
+    // 换一份招标没有可续写的会话：仍旧不传，服务端新发一个
+    expect(sessionIdOf(2)).toBeUndefined()
+  })
+
+  it('服务端没给会话时不会瞎传一个客户端自造 ID', async () => {
+    mocks.createMatchTask.mockResolvedValue({ taskId: 1 })
+
+    const match = newMatch()
+    await match.start(8, 'u1')
+    await match.start(8, 'u1')
+
+    expect(sessionIdOf(0)).toBeUndefined()
+    expect(sessionIdOf(1)).toBeUndefined()
+    expect(match.sessionId.value).toBeNull()
   })
 
   it('续看已有任务时不需要幂等键', async () => {

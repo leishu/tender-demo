@@ -11,6 +11,7 @@ import reactor.core.publisher.Flux;
 import tools.jackson.databind.json.JsonMapper;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -39,6 +40,15 @@ import java.util.concurrent.ConcurrentHashMap;
 @Slf4j
 @Component
 public class TenderTaskEventHub {
+
+    /**
+     * 占位事件类型：某条事件序列化失败时用它顶上。
+     *
+     * <p>刻意不用 {@code error}：解析侧把 {@code error} 当终止信号，一条“某条数据缺失”
+     * 的诊断事件不该把还在跑的解析在界面上提前判死。客户端按未知模块忽略即可，
+     * 服务端日志与回放里能查到。</p>
+     */
+    private static final String EVENT_WARN = "warn";
 
     private final TenderTaskEventMapper eventMapper;
     private final TenderTaskMapper taskMapper;
@@ -92,12 +102,20 @@ public class TenderTaskEventHub {
             log.debug("任务 {} 不在本实例运行，丢弃事件 {}", taskId, eventType);
             return;
         }
+        String type = eventType;
         String json;
         try {
             json = jsonMapper.writeValueAsString(payload);
         } catch (Exception e) {
-            log.warn("任务 {} 的事件 {} 序列化失败，已跳过", taskId, eventType, e);
-            return;
+            // 序列化失败不能等同于“这条事件没有发生过”：中间事件丢了就是结果缺块，
+            // 而客户端只会看到一段沉默。改写成一条可见的 warn 占位事件，
+            // 让“这里少了一条”在回放里留得下痕迹（非终止事件，不改变任务状态）。
+            log.error("任务 {} 的事件 {} 序列化失败，改写为 warn 占位事件", taskId, type, e);
+            type = EVENT_WARN;
+            json = warnPayload("事件 " + eventType + " 序列化失败，该条数据缺失");
+            if (json == null) {
+                return;
+            }
         }
 
         synchronized (session.lock) {
@@ -105,14 +123,14 @@ public class TenderTaskEventHub {
                 return;
             }
             int seq = session.lastSeq + 1;
-            TenderTaskEventRecord record = newRecord(taskId, seq, eventType, json);
+            TenderTaskEventRecord record = newRecord(taskId, seq, type, json);
             try {
                 eventMapper.insert(record);
             } catch (DuplicateKeyException e) {
                 // 上次 insert 可能已提交但连接中断，或另一实例抢先用了同一个 seq。
                 // 以事件表的最大序号为准重新取号，保证终止事件不会因为一次碰撞而丢掉。
                 int next = Math.max(seq + 1, eventMapper.maxSeq(taskId) + 1);
-                record = newRecord(taskId, next, eventType, json);
+                record = newRecord(taskId, next, type, json);
                 eventMapper.insert(record);
                 seq = next;
             }
@@ -126,7 +144,7 @@ public class TenderTaskEventHub {
                 log.warn("任务 {} 的事件序号缓存更新失败: seq={}", taskId, seq, e);
             }
 
-            TaskEvent event = new TaskEvent(seq, eventType, json);
+            TaskEvent event = new TaskEvent(seq, type, json);
             for (Listener listener : session.listeners) {
                 try {
                     listener.next(event);
@@ -135,6 +153,24 @@ public class TenderTaskEventHub {
                     log.debug("任务 {} 的事件 {} 推送失败，跳过该订阅者", taskId, seq, e);
                 }
             }
+        }
+    }
+
+    /**
+     * 占位事件负载，与各领域事件同构（{@code {"module":...,"message":...}}），
+     * 客户端按 {@code module} 分派时自然落到“忽略”分支。
+     *
+     * @return 序列化后的 JSON；占位负载本身再失败时返回 {@code null}（此时只能丢弃）
+     */
+    private String warnPayload(String message) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("module", EVENT_WARN);
+        payload.put("message", message);
+        try {
+            return jsonMapper.writeValueAsString(payload);
+        } catch (Exception e) {
+            log.error("占位事件负载序列化失败，本条事件只能丢弃: {}", message, e);
+            return null;
         }
     }
 
@@ -231,9 +267,15 @@ public class TenderTaskEventHub {
         sessions.remove(taskId);
     }
 
-    /** 任务是否仍在本实例内存中（用于诊断与测试） */
-    public boolean isActive(long taskId) {
-        return sessions.containsKey(taskId);
+    /**
+     * 事件表里的真实最大序号，用作续传游标。
+     *
+     * <p>不要拿 {@code t_tender_task.last_event_seq} 当游标：它只是进度缓存，
+     * 与事件入库是两条 SQL，进程崩溃在两者之间时会滞后，拿它续传会重放重复事件。
+     * 两者相差几条的代价是一次带唯一键的查询，而对“断线重连”这种低频操作完全可接受。</p>
+     */
+    public int maxSeq(long taskId) {
+        return eventMapper.maxSeq(taskId);
     }
 
     /** 从数据库读取指定游标之后的事件 */

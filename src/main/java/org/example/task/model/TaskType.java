@@ -49,14 +49,4 @@ public enum TaskType {
     public boolean isStreaming() {
         return streaming;
     }
-
-    /** 根据字符串值反查枚举；无法匹配时返回 {@code null} */
-    public static TaskType fromCode(String code) {
-        for (TaskType type : values()) {
-            if (type.code.equals(code)) {
-                return type;
-            }
-        }
-        return null;
-    }
 }

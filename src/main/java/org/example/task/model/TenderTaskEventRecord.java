@@ -27,7 +27,10 @@ public class TenderTaskEventRecord {
     /** 任务内事件序号，从 1 单调递增 */
     private Integer seq;
 
-    /** 事件类型：project / qualification / performance / personnel / scoringItem / error / completed */
+    /**
+     * 事件类型：project / qualification / performance / personnel / scoringItem / error / completed，
+     * 以及 hub 层的 {@code warn}（某条事件序列化失败时的占位事件，非终止）
+     */
     private String eventType;
 
     /** 事件载荷（JSON），SSE 的 data 行原文 */

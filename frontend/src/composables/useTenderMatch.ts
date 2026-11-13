@@ -8,17 +8,12 @@ import type {
 import { tenderApi } from '@/api/tender'
 import { identityHeaders } from '@/api/identity'
 import { newIdempotencyKey } from '@/utils/idempotency'
+import { getSessionId, rememberSessionId } from '@/utils/session'
 import { streamSse } from './useSse'
 import { isAbortError, toErrorMessage } from '@/utils/async'
 
 export type MatchStreamStatus =
-  | 'idle'
-  | 'connecting'
-  | 'streaming'
-  | 'reconnecting'
-  | 'done'
-  | 'error'
-  | 'cancelled'
+  'idle' | 'connecting' | 'streaming' | 'reconnecting' | 'done' | 'error' | 'cancelled'
 
 /** 事件流断开后的重连次数上限；超过后改为查询任务状态，避免无限重试 */
 const MAX_RECONNECT = 3
@@ -59,6 +54,13 @@ export function useTenderMatch() {
   const idempotencyKey = ref<string | null>(null)
   /** 服务端是否已确认任务到达终态（失败/取消/成功）；断线但任务仍在跑时为 false */
   const taskSettled = ref(false)
+  /**
+   * 本次任务使用的 Agent 会话 ID，由服务端签发（`TenderTaskCreated.sessionId`）。
+   *
+   * 不自己派生：服务端只接受它签发过的形态（`年-月-日-时-流水号`），
+   * 自造 ID 会被 400 拒掉。没有历史会话时不传，由服务端新开一段。
+   */
+  const sessionId = ref<string | null>(null)
   const controller = shallowRef<AbortController | null>(null)
   let runId = 0
   // 只有收到 completed 事件才算正常结束；连接关闭本身不代表匹配成功
@@ -101,7 +103,12 @@ export function useTenderMatch() {
 
     try {
       const task = await tenderApi.createMatchTask(
-        { userId, tenderRequirementId },
+        {
+          userId,
+          // 有历史会话就续写（重试接着上一次的推理），没有则不传，由服务端签发新会话
+          sessionId: getSessionId(tenderRequirementId, 'match') ?? undefined,
+          tenderRequirementId,
+        },
         currentController.signal,
         key,
       )
@@ -112,6 +119,9 @@ export function useTenderMatch() {
         throw new Error('服务端未返回任务ID')
       }
       taskId.value = task.taskId
+      // 记下服务端签发的会话：下次匹配原样回传即续写
+      sessionId.value = task.sessionId ?? null
+      rememberSessionId(tenderRequirementId, 'match', task.sessionId)
       // 意图已经落成任务号：之后以 taskId 为唯一凭据，再点“重新匹配”就是新的一次
       idempotencyKey.value = null
       await subscribe(task.taskId, 0, currentRun)
@@ -350,6 +360,7 @@ export function useTenderMatch() {
     finishedAt.value = null
     taskId.value = null
     lastEventId.value = 0
+    sessionId.value = null
     sawCompleted = false
     taskSettled.value = false
   }
@@ -370,6 +381,7 @@ export function useTenderMatch() {
     taskId,
     lastEventId,
     idempotencyKey,
+    sessionId,
     taskSettled,
     isRunning,
     receivedCount,

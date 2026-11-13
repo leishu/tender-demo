@@ -54,13 +54,18 @@ public class CatalogGenerationService {
     }
 
     /** 以单段提示词生成目录。 */
-    public Mono<CatalogResult> generate(String userId, String prompt) {
-        return generate(userId, List.of(TextBlock.builder().text(prompt).build()));
+    public Mono<CatalogResult> generate(String userId, String sessionId, String prompt) {
+        return generate(userId, sessionId, List.of(TextBlock.builder().text(prompt).build()));
     }
 
-    /** 以多个内容块发送，避免将规则、上一轮目录与用户要求拼接成一段超长文本。 */
-    public Mono<CatalogResult> generate(String userId, List<ContentBlock> blocks) {
-        RuntimeContext ctx = contextBuilder.build(userId);
+    /**
+     * 以多个内容块发送，避免将规则、上一轮目录与用户要求拼接成一段超长文本。
+     *
+     * <p>{@code sessionId} 非空时复用客户端会话：生成与调整使用同一个 ID 即可让模型
+     * 看到上一轮目录，不必每次都把完整目录塞回提示词。为空则由服务端生成新会话。</p>
+     */
+    public Mono<CatalogResult> generate(String userId, String sessionId, List<ContentBlock> blocks) {
+        RuntimeContext ctx = contextBuilder.build(userId, sessionId);
 
         HarnessAgent.Builder builder = builderProvider.getObject();
 

@@ -15,11 +15,13 @@ public record TenderTaskView(
         @Schema(description = "任务ID") Long taskId,
         @Schema(description = "任务类型") TaskType type,
         @Schema(description = "任务状态") TaskStatus status,
-        @Schema(description = "已落库的最大事件序号，可作为 lastEventId 续传游标") Integer lastEventId,
+        @Schema(description = "事件表里的真实最大序号，可直接作为 lastEventId 续传游标；同步任务恒为 0") Integer lastEventId,
         @Schema(description = "失败或取消原因；成功时为空") String errorMessage,
         @Schema(description = "可缓存的最终结果（目录/章节）；解析任务为空，结果由事件承载") Object result,
         @Schema(description = "创建时间(epoch ms)") Long createdAt,
         @Schema(description = "更新时间(epoch ms)") Long updatedAt,
-        @Schema(description = "进入终态的时间(epoch ms)") Long finishedAt
+        @Schema(description = "进入终态的时间(epoch ms)") Long finishedAt,
+        @Schema(description = "本次任务使用的会话ID；续写时原样回传", example = "2026-11-13-09-3")
+        String sessionId
 ) {
 }

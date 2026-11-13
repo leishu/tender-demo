@@ -5,6 +5,7 @@ import { CopyDocument, MagicStick } from '@element-plus/icons-vue'
 import { useAsyncTask } from '@/composables/useAsyncTask'
 import { tenderApi } from '@/api/tender'
 import { newIdempotencyKey } from '@/utils/idempotency'
+import { getSessionId, rememberSessionId } from '@/utils/session'
 import { useWorkflowStore } from '@/stores/workflow'
 import type { CatalogNode } from '@/api/types'
 
@@ -79,10 +80,14 @@ async function generate() {
   }
   const key = chapterKey ?? newIdempotencyKey('chapter')
   chapterKey = key
+  // 同一份招标的章节续写同一段会话：后写的章节能看到前文，术语与行文保持一致。
+  // 还没有历史会话（首次撰写、或换了一份招标）时不传，由服务端签发。
+  const requirementId = workflow.tenderRequirementId
   const result = await run((signal) =>
     tenderApi.generateChapter(
       {
         userId: workflow.userId,
+        sessionId: getSessionId(requirementId, 'chapter') ?? undefined,
         chapterTitle: title,
         scoringPointIds: scoringPointIds.value.join(','),
       },
@@ -95,7 +100,8 @@ async function generate() {
     return
   }
   chapterKey = null
-  content.value = result
+  rememberSessionId(requirementId, 'chapter', result.sessionId)
+  content.value = result.data
   ElMessage.success('章节生成完成')
 }
 

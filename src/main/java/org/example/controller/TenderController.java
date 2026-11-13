@@ -24,6 +24,7 @@ import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -88,6 +89,10 @@ public class TenderController {
                     ### 请求体
                     - `tenderText`：招标文件原始文本（必填）
                     - `userId`：用户ID（可选，**仅本地调试兜底**；正式环境用请求头）
+                    - `sessionId`：会话 ID（可选）。**只由服务端签发**：不传则新开一段会话，
+                      并把 ID 通过 `X-Session-Id` 响应头返回；要续写就把它原样回传，
+                      Agent 才能看到上一次的提示词与结果。
+                      只接受 `年-月-日-时-流水号`（如 `2026-11-13-09-3`），其它形态一律 400
 
                     ### 调用者身份
                     `X-User-Id` 请求头优先，缺失时才回退到请求体的 `userId`。
@@ -101,7 +106,7 @@ public class TenderController {
                     ### 响应
                     - `taskId`：任务ID，用于订阅事件与查询状态
                     - `type`：固定为 `parse`
-                    - `status`：`pending` / `running` / `succeeded` / `failed` / `cancelled`
+                    - `status`：`running`（建任务即为执行中，没有排队阶段）/ `succeeded` / `failed` / `cancelled`
                     - `eventsUrl`：事件订阅地址
 
                     ### 失败说明
@@ -111,14 +116,17 @@ public class TenderController {
                     """)
     @PostMapping("/parse")
     @ResponseStatus(HttpStatus.ACCEPTED)
-    public Mono<TenderTaskCreated> parseTender(
+    public Mono<ResponseEntity<TenderTaskCreated>> parseTender(
             @RequestBody TenderRequest request,
             @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
             @Parameter(description = "调用者身份（由网关注入；本地调试可省略）")
             @RequestHeader(value = CallerIdentity.USER_HEADER, required = false) String userHeader) {
         String callerId = callerIdentity.resolve(userHeader, request.getUserId());
         return Mono.fromCallable(() -> taskService.createParseTask(request, idempotencyKey, callerId))
-                .subscribeOn(Schedulers.boundedElastic());
+                .subscribeOn(Schedulers.boundedElastic())
+                .map(created -> ResponseEntity.status(HttpStatus.ACCEPTED)
+                        .header(RuntimeContextBuilder.SESSION_HEADER, created.sessionId())
+                        .body(created));
     }
 
     @Operation(summary = "订阅任务事件（SSE，可断线续传）",
@@ -188,10 +196,12 @@ public class TenderController {
                     查询任务的当前状态与最终结果，用于事件流断开后判断“任务是否还在跑”。
 
                     ### 响应
-                    - `status`：`pending` / `running` / `succeeded` / `failed` / `cancelled`
-                    - `lastEventId`：已落库的最大事件序号，可直接作为续传游标
+                    - `status`：`running` / `succeeded` / `failed` / `cancelled`
+                      （`pending` 没有产生路径，仅为兼容历史行保留，不要按它做分支）
+                    - `lastEventId`：取自事件表的真实最大序号，可直接作为续传游标。
+                      任务表上的进度列可能滞后，本接口不使用它
                     - `errorMessage`：失败或取消原因
-                    - `result`：目录/章节任务的缓存结果；解析任务为空（结果由事件承载）
+                    - `result`：目录/章节任务的缓存结果；解析/匹配任务为空（结果由事件承载）
 
                     ### 失败说明
                     任务不存在、或不属于当前调用者返回 404 Not Found（两者不区分，避免枚举他人任务）。
@@ -279,38 +289,52 @@ public class TenderController {
             description = """
                     根据章节标题与关联的评分点撰写投标章节内容。
 
+                    ### 请求体
+                    - `chapterTitle`：章节标题（必填）
+                    - `scoringPointIds`：关联的评分点ID，逗号分隔（必填）
+                    - `sessionId`：会话 ID（可选）。**只由服务端签发**：不传则新开一段会话，
+                      并通过 `X-Session-Id` 响应头返回；回传同一个值可让后续章节看到前文，
+                      保持行文与术语一致。其它形态（客户端自造）一律 400
+
                     ### 幂等
                     可携带 `Idempotency-Key` 请求头。同一用户用同一 key 命中已完成的任务时直接返回
                     缓存正文，不重复调用模型；命中执行中的任务返回 409。
                     """)
     @PostMapping("/chapter")
-    public Mono<String> generateChapter(@RequestBody ChapterRequest request,
+    public Mono<ResponseEntity<String>> generateChapter(@RequestBody ChapterRequest request,
                                         @RequestHeader(value = "Idempotency-Key", required = false)
                                         String idempotencyKey,
                                         @Parameter(description = "调用者身份（由网关注入）")
                                         @RequestHeader(value = CallerIdentity.USER_HEADER, required = false)
                                         String userHeader) {
         String callerId = callerIdentity.resolve(userHeader, request.getUserId());
-        // 会话在真正需要调用模型时才创建：命中缓存时不消耗 sessionId，也不 build agent
+        // 会话 ID 在这里同步定下来：非法回传值直接 400，不传则由服务端签发
+        String sessionId = contextBuilder.resolveSessionId(request.getSessionId());
+        // 会话在真正需要调用模型时才创建：命中缓存时不 build agent，也不会重复调模型
         return taskService.runOnce(TaskType.CHAPTER,
-                callerId,
-                idempotencyKey,
-                request,
-                String.class,
-                () -> {
-                    RuntimeContext ctx = contextBuilder.build(callerId);
-                    HarnessAgent.Builder builder = builderProvider.getObject();
-                    return Mono.using(
-                            builder::build,
-                            agent -> agent.call(
-                                    new UserMessage(String.format(
-                                            "撰写章节“%s”，对应评分点：%s",
-                                            request.getChapterTitle(), request.getScoringPointIds()
-                                    )),
-                                    ctx
-                            ).map(Msg::getTextContent),
-                            HarnessAgent::close);
-                });
+                        callerId,
+                        idempotencyKey,
+                        request,
+                        sessionId,
+                        String.class,
+                        () -> {
+                            // 同一个会话里撰写下一章时，模型能看到前文，术语与行文保持一致
+                            RuntimeContext ctx = contextBuilder.build(callerId, sessionId);
+                            HarnessAgent.Builder builder = builderProvider.getObject();
+                            return Mono.using(
+                                    builder::build,
+                                    agent -> agent.call(
+                                            new UserMessage(String.format(
+                                                    "撰写章节“%s”，对应评分点：%s",
+                                                    request.getChapterTitle(), request.getScoringPointIds()
+                                            )),
+                                            ctx
+                                    ).map(Msg::getTextContent),
+                                    HarnessAgent::close);
+                        })
+                .map(execution -> ResponseEntity.ok()
+                        .header(RuntimeContextBuilder.SESSION_HEADER, execution.sessionId())
+                        .body(execution.value()));
     }
 
     /** SSE 事件：id 为任务内递增序号，event 为模块名，data 为事件 JSON 原文 */

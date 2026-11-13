@@ -27,6 +27,21 @@
 - **SSE 保活**：事件流空闲时每 30s 发一条 `: ping` 注释帧（`TENDER_TASK_SSE_KEEP_ALIVE_MS`，默认 30000，
   `<=0` 关闭）。匹配在首条结果出来前可能几分钟没有任何帧，中间代理容易按空闲超时把连接掐掉；
   注释帧不带 `id`，不影响 `Last-Event-ID` 续传游标，客户端按 SSE 协议直接忽略。
+- **续传游标的权威来源**：`GET /tender/tasks/{taskId}` 返回的 `lastEventId` 取自事件表的 `MAX(seq)`，
+  而任务表上的 `last_event_seq` 只是进度缓存（写事件与更新该列是两条 SQL，崩溃窗口内会滞后），
+  拿它续传会重放已收到的事件，因此只用于展示，不对外当游标。
+- **并发准入**：建任务时按“还在执行中的任务数”限流——单用户 3 个、全实例 20 个
+  （`TENDER_TASK_MAX_RUNNING_PER_USER` / `TENDER_TASK_MAX_RUNNING_TOTAL`，`<=0` 关闭），
+  超限返回 429 并把请求挡在模型调用之前。计数来自数据库（`status=running` 且在租约内），
+  与陈旧回收共用“什么算还活着”的定义，所以崩溃留下的死任务不会一直占名额。
+  新建任务和“重跑失败任务 / 接管陈旧任务”都要占名额，只有幂等命中已有任务才不占。
+  计数单位是任务而不是模型调用：一个匹配任务会跑人员/资质两路子 Agent，补跑还会更多。
+  这是准入控制而非精确配额：并发请求之间存在很窄的竞态窗口，硬配额需要分布式信号量。
+  注意：关闭陈旧回收（`stale-minutes<=0`）时，崩溃留下的 `running` 行会永久占名额，
+  启动日志会为此打 WARN。
+- **事件不静默丢失**：某条事件序列化失败时不再只打日志丢掉，而是写一条 `warn` 占位事件
+  （`{"module":"warn","message":"事件 X 序列化失败，该条数据缺失"}`）并占住该序号。
+  用 `warn` 而不是 `error`：解析侧把 `error` 当终止信号，一条诊断事件不该把还在跑的解析判死。
 - **幂等与结果缓存**：解析、目录生成/调整、章节撰写均支持 `Idempotency-Key` 请求头。幂等作用域是
   `(user_id, idempotency_key)`：同一用户重复提交复用同一个任务，不同用户撞同一个键互不影响
   （全局唯一会让两个用户拿到对方的任务）。目录/章节命中已完成的任务时直接返回缓存结果，不再调用模型。
@@ -171,6 +186,54 @@ curl -X POST http://localhost:8080/tender/match \
 curl -N -H "X-User-Id: u1" http://localhost:8080/tender/tasks/2048/events
 curl -N -H "X-User-Id: u1" -H "Last-Event-ID: 5" http://localhost:8080/tender/tasks/2048/events
 ```
+
+### 7. 会话续写（可选）
+
+会话 ID **只由服务端签发**，客户端不自己造 ID：
+
+- 想开新会话：请求里**不传** `sessionId`；
+- 想续写旧会话：把上一次响应里的 `sessionId` **原样回传**。
+
+```bash
+# 第一次：不传 sessionId，服务端签发一个并通过 X-Session-Id 响应头返回
+curl -i -X POST http://localhost:8080/tender/chapter \
+  -H "Content-Type: application/json" -H "X-User-Id: u1" \
+  -d '{"chapterTitle":"施工组织设计","scoringPointIds":"1,2"}'
+# X-Session-Id: 2026-11-13-09-1
+
+# 第二次：回传这个 ID，AgentScope 从 t_agent_state 读回上一次的 agent_state，
+# 历史消息成为本轮上下文
+curl -X POST http://localhost:8080/tender/chapter \
+  -H "Content-Type: application/json" -H "X-User-Id: u1" \
+  -d '{"sessionId":"2026-11-13-09-1","chapterTitle":"质量保证措施","scoringPointIds":"3"}'
+```
+
+| 接口 | 会话 ID 回传方式 |
+|------|------------------|
+| `POST /tender/parse`、`POST /tender/match` | 响应体 `sessionId` + `X-Session-Id` 响应头 |
+| `GET /tender/tasks/{taskId}` | 响应体 `sessionId` |
+| `POST /tender/catalog`、`/tender/catalog/adjust`、`/tender/chapter` | `X-Session-Id` 响应头（响应体形状不变） |
+
+- **不传或传空**：服务端按小时生成新 ID（`2026-11-13-09-1` 这种），每次都是新会话。
+- **格式**：只接受服务端签发的那种形态 `年-月-日-时-流水号`
+  （`\d{4}-\d{2}-\d{2}-\d{2}-\d{1,10}`）。客户端自造的 ID（`req-8-catalog` 之类）一律 400，
+  且发生在**落任务行之前**——不会先建一条注定失败的任务。
+  这样客户端既撞不到服务端的按小时计数器，也不受 `sessionId` 落盘路径（workspace 目录名、
+  transcript 文件名）的约束：只放行数字与连字符，天然排除 `/`、`..`、空白与控制字符。
+- **归属**：会话按 `(X-User-Id, sessionId)` 隔离，不同用户传同一个 ID 也读不到对方的数据。
+  带 `Idempotency-Key` 时，幂等命中返回的是**原任务用的那个会话**，不会另发一个新的。
+- 同一 `sessionId` 建议串行调用。并发写同一会话时，框架默认的冲突策略是“后写覆盖”，
+  两边新增的消息可能互相丢失。内置前端因此按「招标要求 + 任务类型」分别记住服务端下发的 ID
+  （`sessionStorage`，按标签页隔离）：目录“生成”开新会话、“调整”续写同一会话，逐章撰写续写
+  同一会话，三类任务之间互不干扰，也不会因为两个标签页并行而互相覆盖。
+
+> 续写只依赖 `agent_state` 里的 `context`，**不需要开启 memory**。当前配置关闭的是长期记忆
+> 工具与记忆整理（`disableMemoryTools` / `disableMemoryHooks`），不影响会话上下文的读写；
+> 上下文过长时由框架自带的 compaction 生成摘要，也不会无限增长。
+
+> 续写只依赖 `agent_state` 里的 `context`，**不需要开启 memory**。当前配置关闭的是长期记忆
+> 工具与记忆整理（`disableMemoryTools` / `disableMemoryHooks`），不影响会话上下文的读写；
+> 上下文过长时由框架自带的 compaction 生成摘要，也不会无限增长。
 
 ## Langfuse 链路追踪
 

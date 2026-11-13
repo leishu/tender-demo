@@ -174,6 +174,8 @@ type TenderTaskCreated = {
   type?: TaskType
   status?: TaskStatus
   eventsUrl?: string
+  /** 本次任务使用的会话ID（服务端签发）；续写时原样回传 */
+  sessionId?: string
 }
 
 type TenderTaskView = {
@@ -186,6 +188,8 @@ type TenderTaskView = {
   createdAt?: number
   updatedAt?: number
   finishedAt?: number
+  /** 本次任务使用的会话ID；续写时原样回传 */
+  sessionId?: string
 }
 
 export interface paths {
@@ -426,6 +430,7 @@ export interface components {
   schemas: {
     TenderRequest: {
       userId?: string
+      sessionId?: string
       tenderText?: string
     }
     TenderTaskCreated: TenderTaskCreated
@@ -444,10 +449,12 @@ export interface components {
     ScoringItem: ScoringItem
     CatalogRequest: {
       userId?: string
+      sessionId?: string
       tenderRequirementId?: number
     }
     CatalogAdjustRequest: {
       userId?: string
+      sessionId?: string
       tenderRequirementId?: number
       previousCatalog?: CatalogResult
       customPrompt?: string
@@ -469,6 +476,7 @@ export interface components {
     KnowledgeSearchHit: KnowledgeSearchHit
     MatchRequest: {
       userId?: string
+      sessionId?: string
       tenderRequirementId?: number
     }
     MatchStatus: MatchStatus

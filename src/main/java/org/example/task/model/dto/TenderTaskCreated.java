@@ -23,6 +23,11 @@ public record TenderTaskCreated(
 
         @Schema(description = "事件订阅地址（SSE），可带 ?lastEventId=N 从指定位置续传",
                 example = "/tender/tasks/1024/events")
-        String eventsUrl
+        String eventsUrl,
+
+        @Schema(description = "本次任务使用的会话ID。续写同一段会话时原样回传；"
+                + "幂等命中时返回原任务的会话，不传则服务端新建",
+                example = "2026-11-13-09-3")
+        String sessionId
 ) {
 }

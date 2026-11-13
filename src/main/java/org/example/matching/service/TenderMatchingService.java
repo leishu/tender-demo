@@ -118,18 +118,22 @@ public class TenderMatchingService {
      * @param callerId 调用者身份；作为 Agent 会话命名空间，不取请求体里的 {@code userId}
      */
     public TaskStream taskStream(MatchRequest request, String callerId) {
+        // 会话 ID 先于查库定下来：非法回传值直接 400，而不是让后台任务失败；
+        // 不传时由服务端签发，响应里会把它回给客户端
+        String sessionId = contextBuilder.resolveSessionId(request.getSessionId());
         TenderRequirements requirements = requireRequirements(request.getTenderRequirementId());
-        Flux<TaskStreamEvent> events = Flux.defer(() -> run(callerId, requirements))
+        Flux<TaskStreamEvent> events = Flux.defer(() -> run(callerId, sessionId, requirements))
                 .filter(event -> event.getModule() != null)
                 .map(event -> new TaskStreamEvent(
                         event.getModule().getCode(), event, event.getMessage()));
         // 匹配的 error 是非终止告警（某一路失败/缺条），必须随流落库给回放；
         // 只有 completed 才是成功信号
-        return new TaskStream(events, true);
+        return new TaskStream(events, true, sessionId);
     }
 
-    private Flux<MatchEvent<?>> run(String userId, TenderRequirements requirements) {
-        RuntimeContext ctx = contextBuilder.build(userId);
+    private Flux<MatchEvent<?>> run(String userId, String sessionId, TenderRequirements requirements) {
+        // 会话 ID 已由 taskStream 定好：主/子 Agent 都续写同一段上下文
+        RuntimeContext ctx = contextBuilder.build(userId, sessionId);
         HarnessAgent.Builder builder = builderProvider.getObject();
         if (!registerMatcherDeclarations(builder)) {
             // 不补 completed：配置缺失属于任务失败，任务层据此把状态落为 failed 并保留错误原因

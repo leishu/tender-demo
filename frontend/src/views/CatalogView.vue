@@ -7,6 +7,7 @@ import CatalogTree from '@/features/catalog/CatalogTree.vue'
 import { useAsyncTask } from '@/composables/useAsyncTask'
 import { tenderApi } from '@/api/tender'
 import { newIdempotencyKey } from '@/utils/idempotency'
+import { forgetSessionId, getSessionId, rememberSessionId } from '@/utils/session'
 import { useWorkflowStore } from '@/stores/workflow'
 import type { CatalogNode } from '@/api/types'
 
@@ -91,6 +92,13 @@ function resetErrors() {
   saveError.value = ''
 }
 
+/**
+ * 会话的用法：**生成目录开新会话，调整续写同一会话。**
+ *
+ * 生成是一次新的推理（哪怕沿用旧会话也只是让模型多背一段无关历史），因此不传 `sessionId`，
+ * 由服务端签发；响应里的 ID 记下来，供随后的「调整」原样回传——调整轮才能看到上一轮目录，
+ * 不必把整份目录重述一遍。
+ */
 async function generate() {
   const requirementId = workflow.tenderRequirementId
   if (!requirementId) {
@@ -99,9 +107,14 @@ async function generate() {
   resetErrors()
   const key = generateKey ?? newIdempotencyKey('catalog')
   generateKey = key
+  // 重新生成视为新会话：丢掉上一段的记忆，避免新目录被旧上下文带偏
+  forgetSessionId(requirementId, 'catalog')
   const result = await runGenerate((signal) =>
     tenderApi.generateCatalog(
-      { userId: workflow.userId, tenderRequirementId: requirementId },
+      {
+        userId: workflow.userId,
+        tenderRequirementId: requirementId,
+      },
       signal,
       key,
     ),
@@ -111,7 +124,8 @@ async function generate() {
     return
   }
   generateKey = null
-  workflow.setCatalogResult(result)
+  rememberSessionId(requirementId, 'catalog', result.sessionId)
+  workflow.setCatalogResult(result.data)
   workflow.setCatalogRunId(null)
   ElMessage.success('目录生成完成')
 }
@@ -145,6 +159,8 @@ async function adjust() {
     tenderApi.adjustCatalog(
       {
         userId: workflow.userId,
+        // 续写生成那一段会话：模型能看到上一轮目录与当时的生成规则
+        sessionId: getSessionId(requirementId, 'catalog') ?? undefined,
         tenderRequirementId: requirementId,
         previousCatalog: previous,
         customPrompt: prompt,
@@ -158,7 +174,8 @@ async function adjust() {
     return
   }
   adjustKey = null
-  workflow.setCatalogResult(result)
+  rememberSessionId(requirementId, 'catalog', result.sessionId)
+  workflow.setCatalogResult(result.data)
   workflow.setCatalogRunId(null)
   adjustPrompt.value = ''
   ElMessage.success('目录已调整，请核对后保存')

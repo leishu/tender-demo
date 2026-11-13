@@ -112,6 +112,14 @@
             <scope>test</scope>
         </dependency>
 
+        <!-- 手写 SQL 的验证：用内存库真跑一遍 mapper 的注解 SQL，不依赖本地 MySQL -->
+        <dependency>
+            <groupId>com.h2database</groupId>
+            <artifactId>h2</artifactId>
+            <version>2.4.240</version>
+            <scope>test</scope>
+        </dependency>
+
 
 
     </dependencies>

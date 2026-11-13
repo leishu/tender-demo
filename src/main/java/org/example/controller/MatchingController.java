@@ -6,11 +6,13 @@ import io.swagger.v3.oas.annotations.tags.Tag;
 import org.example.matching.model.req.MatchRequest;
 import org.example.matching.service.TenderMatchingService;
 import org.example.service.CallerIdentity;
+import org.example.service.RuntimeContextBuilder;
 import org.example.task.model.TaskType;
 import org.example.task.model.dto.TenderTaskCreated;
 import org.example.task.service.TaskStream;
 import org.example.task.service.TenderTaskService;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
@@ -44,6 +46,9 @@ public class MatchingController {
                     ### 请求体
                     - `tenderRequirementId`：已入库的招标要求主键（必填）
                     - `userId`：用户ID（可选，**仅本地调试兜底**；正式环境用请求头）
+                    - `sessionId`：会话 ID（可选）。**只由服务端签发**：不传则新开一段会话，
+                      并通过 `X-Session-Id` 响应头返回；回传同一个值会续写同一段会话
+                      （主 Agent 与两路子 Agent 都续写各自的会话槽位）。其它形态一律 400
 
                     ### 调用者身份
                     `X-User-Id` 请求头优先，缺失时才回退到请求体的 `userId`。任务归属与 Agent 会话
@@ -57,7 +62,7 @@ public class MatchingController {
                     ### 响应
                     - `taskId`：任务ID，用于订阅事件与查询状态
                     - `type`：固定为 `match`
-                    - `status`：`pending` / `running` / `succeeded` / `failed` / `cancelled`
+                    - `status`：`running`（建任务即为执行中，没有排队阶段）/ `succeeded` / `failed` / `cancelled`
                     - `eventsUrl`：事件订阅地址
 
                     ### 事件说明（data 结构）
@@ -79,7 +84,7 @@ public class MatchingController {
                     """)
     @PostMapping("/match")
     @ResponseStatus(HttpStatus.ACCEPTED)
-    public Mono<TenderTaskCreated> match(
+    public Mono<ResponseEntity<TenderTaskCreated>> match(
             @RequestBody MatchRequest request,
             @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
             @Parameter(description = "调用者身份（由网关注入；本地调试可省略）")
@@ -87,12 +92,15 @@ public class MatchingController {
         // 身份先于业务校验解析：允许请求头兜底被关闭时，未认证请求直接 401
         String callerId = callerIdentity.resolve(userHeader, request.getUserId());
         return Mono.fromCallable(() -> {
-            // 先校验、后查幂等键：参数错误（400/404）始终如实暴露，不会被幂等命中掩盖。
-            // 副作用是“建任务后招标要求被删”时同 key 重试用会拿到 404 而不是原任务——
-            // 窗口极小的边界情况，可以接受。
-            TaskStream stream = matchingService.taskStream(request, callerId);
-            return taskService.createStreamingTask(TaskType.MATCH, callerId,
-                    idempotencyKey, request, stream);
-        }).subscribeOn(Schedulers.boundedElastic());
+                    // 先校验、后查幂等键：参数错误（400/404）始终如实暴露，不会被幂等命中掩盖。
+                    // 副作用是“建任务后招标要求被删”时同 key 重试用会拿到 404 而不是原任务——
+                    // 窗口极小的边界情况，可以接受。
+                    TaskStream stream = matchingService.taskStream(request, callerId);
+                    return taskService.createStreamingTask(TaskType.MATCH, callerId,
+                            idempotencyKey, request, stream);
+                }).subscribeOn(Schedulers.boundedElastic())
+                .map(created -> ResponseEntity.status(HttpStatus.ACCEPTED)
+                        .header(RuntimeContextBuilder.SESSION_HEADER, created.sessionId())
+                        .body(created));
     }
 }

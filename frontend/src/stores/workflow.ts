@@ -2,6 +2,7 @@ import { computed, ref, watch } from 'vue'
 import { defineStore } from 'pinia'
 import type { CatalogResult, TenderRequirements } from '@/api/types'
 import { getUserId } from '@/api/identity'
+import { clearSessions } from '@/utils/session'
 
 const STORAGE_KEY = 'tender-demo:workflow'
 
@@ -115,6 +116,8 @@ export const useWorkflowStore = defineStore('workflow', () => {
   function reset() {
     clearParsed()
     sessionKey.value += 1
+    // 会话属于“这一轮工作”：工作流清空后不能再让新会话继承旧上下文
+    clearSessions()
     try {
       sessionStorage.removeItem(STORAGE_KEY)
     } catch {

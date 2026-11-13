@@ -21,6 +21,8 @@ import reactor.core.publisher.Flux;
  *
  * @param events                事件流
  * @param errorRecordedInStream {@code error} 事件是否随流落库
+ * @param sessionId             本次任务使用的 Agent 会话 ID（服务端签发）；任务行会把它存下来，
+ *                              供幂等命中时把同一个 ID 回给客户端
  */
-public record TaskStream(Flux<TaskStreamEvent> events, boolean errorRecordedInStream) {
+public record TaskStream(Flux<TaskStreamEvent> events, boolean errorRecordedInStream, String sessionId) {
 }
